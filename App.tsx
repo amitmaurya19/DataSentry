@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  FlatList,
   NativeEventEmitter,
   NativeModules,
   StatusBar,
@@ -225,12 +226,12 @@ function Dashboard() {
           </LinearGradient>
         </View>
 
-        <View style={[styles.card, styles.cardWide]}>
+        <View style={[styles.card, styles.cardWide, styles.feedCard]}>
           <LinearGradient
             colors={['rgba(255,59,59,0.06)', 'rgba(17,25,39,0.98)']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
-            style={styles.cardInner}
+            style={[styles.cardInner, styles.feedCardInner]}
           >
             <View style={styles.cardHeaderRow}>
               <Text style={styles.cardLabel}>Threat Feed</Text>
@@ -241,21 +242,28 @@ function Dashboard() {
               {feed.length === 0 ? (
                 <Text style={styles.feedEmpty}>No anomalies yet. Generate traffic and watch spikes.</Text>
               ) : (
-                feed.slice(0, 12).map((e, idx) => (
-                  <View key={`${e.timestamp}-${idx}`} style={styles.feedRow}>
-                    <Text style={[styles.mono, styles.feedTime]}>{new Date(e.timestamp).toLocaleTimeString()}</Text>
-                    <Text
-                      style={[
-                        styles.mono,
-                        styles.feedMsg,
-                        { color: e.severity === 'HIGH' ? ALERT : e.severity === 'MEDIUM' ? '#FFB020' : ACCENT },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {`UPLOAD_DETECTED | ${e.appName ?? e.packageName ?? 'unknown-app'} | size=${e.size}B | severity=${e.severity}`}
-                    </Text>
-                  </View>
-                ))
+                <FlatList
+                  data={feed}
+                  keyExtractor={(e, idx) => `${e.timestamp}-${idx}`}
+                  showsVerticalScrollIndicator
+                  style={styles.feedList}
+                  contentContainerStyle={styles.feedListContent}
+                  renderItem={({ item: e }) => (
+                    <View style={styles.feedRow}>
+                      <Text style={[styles.mono, styles.feedTime]}>{new Date(e.timestamp).toLocaleTimeString()}</Text>
+                      <Text
+                        style={[
+                          styles.mono,
+                          styles.feedMsg,
+                          { color: e.severity === 'HIGH' ? ALERT : e.severity === 'MEDIUM' ? '#FFB020' : ACCENT },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {`UPLOAD_DETECTED | ${e.appName ?? e.packageName ?? 'unknown-app'} | size=${e.size}B | severity=${e.severity}`}
+                      </Text>
+                    </View>
+                  )}
+                />
               )}
             </View>
           </LinearGradient>
@@ -366,6 +374,13 @@ const styles = StyleSheet.create({
   cardInner: {
     padding: 14,
   },
+  feedCard: {
+    flex: 1,
+    minHeight: 220,
+  },
+  feedCardInner: {
+    flex: 1,
+  },
   cardLabel: {
     color: 'rgba(230,237,243,0.85)',
     fontSize: 12,
@@ -432,7 +447,14 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(11,15,20,0.65)',
     borderWidth: 1,
     borderColor: 'rgba(0,255,198,0.10)',
-    gap: 6,
+    flex: 1,
+    minHeight: 0,
+  },
+  feedList: {
+    flex: 1,
+  },
+  feedListContent: {
+    paddingBottom: 4,
   },
   feedEmpty: {
     color: 'rgba(230,237,243,0.55)',
@@ -443,6 +465,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     alignItems: 'center',
+    marginBottom: 6,
   },
   feedTime: {
     color: 'rgba(230,237,243,0.50)',
