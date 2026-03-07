@@ -1,8 +1,5 @@
 package com.datasentry
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Intent
 import android.app.usage.NetworkStats
 import android.app.usage.NetworkStatsManager
@@ -14,7 +11,6 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import com.facebook.react.bridge.Arguments
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -27,12 +23,10 @@ class VpnPacketCaptureService : VpnService() {
     when (intent?.action) {
       ACTION_STOP -> {
         stopCapture()
-        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         return START_NOT_STICKY
       }
       else -> {
-        startForeground(NOTIFICATION_ID, buildNotification())
         startCapture()
         return START_STICKY
       }
@@ -135,7 +129,6 @@ class VpnPacketCaptureService : VpnService() {
               } catch (_: Throwable) {}
               tunInterface = null
               EventBridge.emit(EventBridge.EVENT_VPN_STATUS, "STOPPED")
-              stopForeground(STOP_FOREGROUND_REMOVE)
               stopSelf()
             }
           }
@@ -163,42 +156,12 @@ class VpnPacketCaptureService : VpnService() {
 
   override fun onRevoke() {
     stopCapture()
-    stopForeground(STOP_FOREGROUND_REMOVE)
     stopSelf()
     super.onRevoke()
   }
 
-  private fun buildNotification(): Notification {
-    val channelId = ensureNotificationChannel()
-    return NotificationCompat.Builder(this, channelId)
-      .setContentTitle("datasentry")
-      .setContentText("VPN packet monitoring active")
-      .setSmallIcon(android.R.drawable.stat_sys_warning)
-      .setOngoing(true)
-      .build()
-  }
-
-  private fun ensureNotificationChannel(): String {
-    val channelId = "datasentry_vpn"
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      val nm = getSystemService(NotificationManager::class.java)
-      val existing = nm.getNotificationChannel(channelId)
-      if (existing == null) {
-        nm.createNotificationChannel(
-          NotificationChannel(
-            channelId,
-            "datasentry VPN",
-            NotificationManager.IMPORTANCE_LOW,
-          ),
-        )
-      }
-    }
-    return channelId
-  }
-
   companion object {
     private const val TAG = "datasentryVPN"
-    private const val NOTIFICATION_ID = 73_001
     private const val POLL_INTERVAL_MS = 1500L
     private const val SNAPSHOT_WINDOW_MS = 15_000L
     private const val APP_ALERT_THRESHOLD_BYTES = 120_000L

@@ -9,7 +9,6 @@ import android.media.ToneGenerator
 import android.net.VpnService
 import android.os.Build
 import android.provider.Settings
-import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -100,7 +99,7 @@ class VpnModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
 
   private fun startServiceInternal() {
     val startIntent = Intent(ctx, VpnPacketCaptureService::class.java)
-    ContextCompat.startForegroundService(ctx, startIntent)
+    ctx.startService(startIntent)
   }
 
   override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
