@@ -257,7 +257,6 @@ function Dashboard() {
                           styles.feedMsg,
                           { color: e.severity === 'HIGH' ? ALERT : e.severity === 'MEDIUM' ? '#FFB020' : ACCENT },
                         ]}
-                        numberOfLines={1}
                       >
                         {`UPLOAD_DETECTED | ${e.appName ?? e.packageName ?? 'unknown-app'} | size=${e.size}B | severity=${e.severity}`}
                       </Text>
@@ -464,15 +463,19 @@ const styles = StyleSheet.create({
   feedRow: {
     flexDirection: 'row',
     gap: 10,
-    alignItems: 'center',
+    alignItems: 'flex-start',
     marginBottom: 6,
   },
   feedTime: {
     color: 'rgba(230,237,243,0.50)',
     width: 96,
+    marginTop: 10,
   },
   feedMsg: {
     flex: 1,
+    marginTop: 0,
+    lineHeight: 18,
+    flexShrink: 1,
   },
   actionsRow: {
     flexDirection: 'row',
