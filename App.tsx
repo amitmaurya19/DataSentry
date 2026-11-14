@@ -1,8 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   NativeEventEmitter,
   NativeModules,
+  PermissionsAndroid,
+  Platform,
   StatusBar,
   StyleSheet,
   Text,
@@ -10,6 +13,7 @@ import {
   TouchableOpacity,
   Vibration,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -36,12 +40,22 @@ type UploadDetectedEvent = {
   deviceTotalDeltaBytes?: number;
 };
 
-type VpnStatus = 'ACTIVE' | 'STOPPED';
+type VpnStatus = 'ACTIVE' | 'STOPPED' | 'STARTING';
+type VpnStatusTarget = 'ACTIVE' | 'STOPPED';
+
+type VpnStatusWaiter = {
+  target: VpnStatusTarget;
+  sawStarting: boolean;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
 
 const { VpnModule } = NativeModules as {
   VpnModule: {
     startVpn: () => Promise<boolean>;
     stopVpn: () => Promise<boolean>;
+    getVpnStatus: () => Promise<VpnStatus>;
     playTick: () => void;
     addListener: (eventType: string) => void;
     removeListeners: (count: number) => void;
@@ -76,12 +90,19 @@ function normalizeUploadEvent(evt: Partial<UploadDetectedEvent> | null | undefin
 
 function Dashboard() {
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
   const eventEmitter = useMemo(() => new NativeEventEmitter(VpnModule), []);
 
-  const [vpnStatus, setVpnStatus] = useState<VpnStatus>('STOPPED');
+  const [vpnStatus, setVpnStatus] = useState<VpnStatus | null>(null);
+  const [vpnTransition, setVpnTransition] = useState<'STARTING' | 'STOPPING' | null>(null);
   const [alertCount, setAlertCount] = useState(0);
   const [feed, setFeed] = useState<UploadDetectedEvent[]>([]);
   const [lastEventAt, setLastEventAt] = useState<number | null>(null);
+  const vpnStatusRef = React.useRef<VpnStatus | null>(null);
+  const statusWaiterRef = React.useRef<VpnStatusWaiter | null>(null);
+  const transitionInProgressRef = React.useRef(false);
+  const lastStartFailureRef = React.useRef(false);
+  const statusEventRevisionRef = React.useRef(0);
 
   const pulse = useSharedValue(0);
   const blink = useSharedValue(0);
@@ -97,7 +118,6 @@ function Dashboard() {
         setAlertCount(c => c + 1);
         setFeed(prev => [normalized, ...prev].slice(0, 60));
 
-        ToastAndroid.show('UPLOAD TRAFFIC DETECTED', ToastAndroid.SHORT);
         try {
           Vibration.vibrate(40);
         } catch {}
@@ -116,22 +136,73 @@ function Dashboard() {
       } catch {}
     });
 
-    const subStatus = eventEmitter.addListener('VPN_STATUS', (s: VpnStatus) => {
-      setVpnStatus(s);
-      if (s === 'ACTIVE') {
-        cancelAnimation(blink);
-        blink.value = withRepeat(withTiming(1, { duration: 900, easing: Easing.linear }), -1, true);
-      } else {
-        cancelAnimation(blink);
-        blink.value = 0;
+    const applyVpnStatus = (s: VpnStatus, fromEvent: boolean) => {
+      const previousStatus = vpnStatusRef.current;
+      if (s === 'STARTING') {
+        lastStartFailureRef.current = false;
+      } else if (previousStatus === 'STARTING' && s === 'STOPPED') {
+        lastStartFailureRef.current = true;
       }
+
+      if (fromEvent) statusEventRevisionRef.current += 1;
+      vpnStatusRef.current = s;
+      setVpnStatus(s);
+
+      const waiter = statusWaiterRef.current;
+      if (!waiter) return;
+      if (s === 'STARTING' && waiter.target === 'ACTIVE') waiter.sawStarting = true;
+      if (s === waiter.target) {
+        clearTimeout(waiter.timeout);
+        statusWaiterRef.current = null;
+        waiter.resolve();
+      } else if (s === 'STOPPED' && waiter.target === 'ACTIVE' && waiter.sawStarting) {
+        clearTimeout(waiter.timeout);
+        statusWaiterRef.current = null;
+        waiter.reject(new Error('VPN service failed to establish the tunnel.'));
+      }
+    };
+
+    const subStatus = eventEmitter.addListener('VPN_STATUS', (s: VpnStatus) => {
+      if (s === 'ACTIVE' || s === 'STOPPED' || s === 'STARTING') applyVpnStatus(s, true);
     });
+
+    const revisionBeforeRead = statusEventRevisionRef.current;
+    VpnModule.getVpnStatus()
+      .then(status => {
+        if (
+          revisionBeforeRead === statusEventRevisionRef.current &&
+          (status === 'ACTIVE' || status === 'STOPPED' || status === 'STARTING')
+        ) {
+          applyVpnStatus(status, false);
+        }
+      })
+      .catch(() => {
+        // Leave status unknown and the toggle disabled if native status cannot be read.
+      });
 
     return () => {
       subUpload.remove();
       subStatus.remove();
+      const waiter = statusWaiterRef.current;
+      if (waiter) {
+        clearTimeout(waiter.timeout);
+        statusWaiterRef.current = null;
+        waiter.reject(new Error('Dashboard was unmounted while waiting for VPN status.'));
+      }
     };
-  }, [eventEmitter, blink, intensity, pulse]);
+  }, [eventEmitter, intensity, pulse]);
+
+  useEffect(() => {
+    if (vpnStatus === 'ACTIVE') {
+      cancelAnimation(blink);
+      blink.value = withRepeat(withTiming(1, { duration: 900, easing: Easing.linear }), -1, true);
+    } else {
+      cancelAnimation(blink);
+      blink.value = 0;
+    }
+
+    return () => cancelAnimation(blink);
+  }, [blink, vpnStatus]);
 
   const alertCardStyle = useAnimatedStyle(() => {
     const glow = interpolate(pulse.value, [0, 1], [0, 18]);
@@ -156,41 +227,150 @@ function Dashboard() {
     };
   });
 
-  async function onStart() {
-    try {
-      await VpnModule.startVpn();
-    } catch (e: any) {
-      if (e?.code === 'USAGE_STATS_REQUIRED') {
-        ToastAndroid.show('Enable Usage Access, then tap Start VPN again.', ToastAndroid.LONG);
-      } else {
-        ToastAndroid.show('VPN start failed (permission denied?)', ToastAndroid.SHORT);
+  function waitForVpnStatus(target: VpnStatusTarget): Promise<void> {
+    if (vpnStatusRef.current === target) return Promise.resolve();
+    if (target === 'ACTIVE' && lastStartFailureRef.current) {
+      return Promise.reject(new Error('VPN service failed to establish the tunnel.'));
+    }
+
+    return new Promise((resolve, reject) => {
+      const waiter: VpnStatusWaiter = {
+        target,
+        sawStarting: vpnStatusRef.current === 'STARTING',
+        resolve,
+        reject,
+        timeout: setTimeout(() => {
+          if (statusWaiterRef.current !== waiter) return;
+          statusWaiterRef.current = null;
+          reject(new Error(`Timed out waiting for VPN status ${target}.`));
+        }, 15_000),
+      };
+
+      statusWaiterRef.current = waiter;
+      if (vpnStatusRef.current === target) {
+        clearTimeout(waiter.timeout);
+        statusWaiterRef.current = null;
+        resolve();
+      } else if (target === 'ACTIVE' && lastStartFailureRef.current) {
+        clearTimeout(waiter.timeout);
+        statusWaiterRef.current = null;
+        reject(new Error('VPN service failed to establish the tunnel.'));
       }
+    });
+  }
+
+  async function onToggleVpn() {
+    if (transitionInProgressRef.current) return;
+    const currentStatus = vpnStatusRef.current;
+    if (currentStatus !== 'ACTIVE' && currentStatus !== 'STOPPED') return;
+
+    const starting = currentStatus === 'STOPPED';
+    transitionInProgressRef.current = true;
+    setVpnTransition(starting ? 'STARTING' : 'STOPPING');
+    if (starting) lastStartFailureRef.current = false;
+
+    try {
+      if (starting) {
+        if (Platform.OS === 'android' && Platform.Version >= 33) {
+          try {
+            const permission = await PermissionsAndroid.request(
+              PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+              {
+                title: 'Allow DataSentry alerts',
+                message: 'Notifications let DataSentry show upload alerts while it is in the background.',
+                buttonPositive: 'Allow',
+                buttonNegative: 'Not now',
+              },
+            );
+            if (permission !== PermissionsAndroid.RESULTS.GRANTED) {
+              ToastAndroid.show(
+                'Allow DataSentry notifications in Android Settings to see alerts outside the app.',
+                ToastAndroid.LONG,
+              );
+            }
+          } catch {
+            ToastAndroid.show(
+              'Allow DataSentry notifications in Android Settings to see alerts outside the app.',
+              ToastAndroid.LONG,
+            );
+          }
+        }
+        await VpnModule.startVpn();
+        const statusRevision = statusEventRevisionRef.current;
+        const nativeStatus = await VpnModule.getVpnStatus();
+        if (statusRevision === statusEventRevisionRef.current) {
+          vpnStatusRef.current = nativeStatus;
+          setVpnStatus(nativeStatus);
+        }
+        await waitForVpnStatus('ACTIVE');
+      } else {
+        await VpnModule.stopVpn();
+        const statusRevision = statusEventRevisionRef.current;
+        const nativeStatus = await VpnModule.getVpnStatus();
+        if (statusRevision === statusEventRevisionRef.current) {
+          vpnStatusRef.current = nativeStatus;
+          setVpnStatus(nativeStatus);
+        }
+        await waitForVpnStatus('STOPPED');
+      }
+    } catch (e: any) {
+      if (starting && e?.code === 'USAGE_STATS_REQUIRED') {
+        ToastAndroid.show('Enable Usage Access, then tap Start VPN again.', ToastAndroid.LONG);
+      } else if (starting && e?.code === 'VPN_DENIED') {
+        ToastAndroid.show('VPN permission was denied.', ToastAndroid.SHORT);
+      } else {
+        ToastAndroid.show(
+          starting ? 'VPN failed to start. Check permissions and try again.' : 'VPN failed to stop. Try again.',
+          ToastAndroid.SHORT,
+        );
+      }
+    } finally {
+      try {
+        const statusRevision = statusEventRevisionRef.current;
+        const nativeStatus = await VpnModule.getVpnStatus();
+        if (statusRevision === statusEventRevisionRef.current) {
+          vpnStatusRef.current = nativeStatus;
+          setVpnStatus(nativeStatus);
+        }
+      } catch {}
+      transitionInProgressRef.current = false;
+      setVpnTransition(null);
     }
   }
 
-  async function onStop() {
-    try {
-      await VpnModule.stopVpn();
-    } catch {}
-  }
+  const isVpnBusy = vpnTransition !== null || vpnStatus === null || vpnStatus === 'STARTING';
+  const isStopping = vpnStatus === 'ACTIVE' || vpnTransition === 'STOPPING';
+  const actionColor = isStopping ? ALERT : ACCENT;
+  const actionLabel =
+    vpnTransition === 'STARTING' || vpnStatus === 'STARTING'
+      ? 'Starting VPN'
+      : vpnTransition === 'STOPPING'
+        ? 'Stopping VPN'
+        : vpnStatus === null
+          ? 'Checking VPN'
+          : vpnStatus === 'ACTIVE'
+            ? 'Stop VPN'
+            : 'Start VPN';
+  const compactLayout = windowHeight < 700;
+  const vpnStatusColor = vpnStatus === 'ACTIVE' ? ACCENT : vpnStatus === 'STARTING' ? '#FFB020' : ALERT;
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
       <StatusBar barStyle="light-content" backgroundColor={BG} />
 
       <View style={styles.headerRow}>
-        <View>
+        <View style={styles.headerCopy}>
           <Text style={styles.title}>Data Sentry</Text>
           <Text style={styles.subTitle}>VPN-based packet telemetry | anomaly feed | live dashboard</Text>
         </View>
 
         <View style={styles.vpnPill}>
           <Animated.View style={[styles.vpnDot, vpnDotStyle]} />
-          <Text style={[styles.vpnText, { color: vpnStatus === 'ACTIVE' ? ACCENT : ALERT }]}>{vpnStatus}</Text>
+          <Text style={[styles.vpnText, { color: vpnStatusColor }]}>{vpnStatus ?? 'CHECKING'}</Text>
         </View>
       </View>
 
-      <View style={styles.grid}>
+      <View style={[styles.grid, compactLayout && styles.compactGrid]}>
         <Animated.View style={[styles.card, styles.cardWide, alertCardStyle]}>
           <LinearGradient
             colors={['rgba(0,255,198,0.12)', 'rgba(17,25,39,0.95)']}
@@ -270,19 +450,18 @@ function Dashboard() {
 
         <View style={styles.actionsRow}>
           <TouchableOpacity
-            onPress={onStart}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: isVpnBusy, busy: isVpnBusy }}
+            accessibilityLabel={actionLabel}
+            disabled={isVpnBusy}
+            onPress={onToggleVpn}
             activeOpacity={0.85}
-            style={[styles.actionBtn, { borderColor: 'rgba(0,255,198,0.45)' }]}
+            style={[styles.actionBtn, isStopping ? styles.actionBtnStop : styles.actionBtnStart]}
           >
-            <Text style={[styles.actionText, { color: ACCENT }]}>Start VPN</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={onStop}
-            activeOpacity={0.85}
-            style={[styles.actionBtn, { borderColor: 'rgba(255,59,59,0.45)' }]}
-          >
-            <Text style={[styles.actionText, { color: ALERT }]}>Stop VPN</Text>
+            {isVpnBusy ? (
+              <ActivityIndicator color={actionColor} size="small" />
+            ) : null}
+            <Text style={[styles.actionText, isStopping ? styles.actionTextStop : styles.actionTextStart]}>{actionLabel}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -292,6 +471,7 @@ function Dashboard() {
         {'  '}|{'  '}
         {lastEventAt ? `last event ${Math.round((Date.now() - lastEventAt) / 1000)}s ago` : 'no events'}
       </Text>
+
     </View>
   );
 }
@@ -317,7 +497,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 14,
-    gap: 12,
+    gap: 8,
+  },
+  headerCopy: {
+    flex: 1,
+    minWidth: 0,
   },
   title: {
     color: TEXT,
@@ -329,6 +513,8 @@ const styles = StyleSheet.create({
     color: 'rgba(230,237,243,0.72)',
     marginTop: 3,
     fontSize: 12,
+    lineHeight: 16,
+    flexShrink: 1,
   },
   vpnPill: {
     flexDirection: 'row',
@@ -340,6 +526,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(17,25,39,0.75)',
     borderWidth: 1,
     borderColor: 'rgba(0,255,198,0.14)',
+    flexShrink: 1,
+    maxWidth: '43%',
   },
   vpnDot: {
     width: 8,
@@ -350,10 +538,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.8,
+    flexShrink: 1,
   },
   grid: {
     flex: 1,
+    minHeight: 0,
     gap: 12,
+  },
+  compactGrid: {
+    gap: 8,
   },
   card: {
     backgroundColor: PANEL,
@@ -369,16 +562,18 @@ const styles = StyleSheet.create({
   },
   cardWide: {
     width: '100%',
+    minWidth: 0,
   },
   cardInner: {
     padding: 14,
   },
   feedCard: {
     flex: 1,
-    minHeight: 220,
+    minHeight: 120,
   },
   feedCardInner: {
     flex: 1,
+    minHeight: 0,
   },
   cardLabel: {
     color: 'rgba(230,237,243,0.85)',
@@ -392,6 +587,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 8,
   },
   alertCount: {
     color: TEXT,
@@ -400,17 +596,24 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   alertMeta: {
+    flex: 1,
+    minWidth: 0,
     alignItems: 'flex-end',
+    paddingLeft: 8,
   },
   alertHint: {
     color: 'rgba(230,237,243,0.62)',
     fontSize: 12,
     marginBottom: 4,
+    textAlign: 'right',
+    flexShrink: 1,
   },
   alertHint2: {
     color: 'rgba(230,237,243,0.80)',
     fontSize: 12,
     fontWeight: '700',
+    textAlign: 'right',
+    flexShrink: 1,
   },
   intensityTrack: {
     width: '100%',
@@ -438,6 +641,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 8,
   },
   feedBox: {
     marginTop: 4,
@@ -448,9 +652,11 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(0,255,198,0.10)',
     flex: 1,
     minHeight: 0,
+    overflow: 'hidden',
   },
   feedList: {
     flex: 1,
+    minHeight: 0,
   },
   feedListContent: {
     paddingBottom: 4,
@@ -462,43 +668,60 @@ const styles = StyleSheet.create({
   },
   feedRow: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     alignItems: 'flex-start',
     marginBottom: 6,
   },
   feedTime: {
     color: 'rgba(230,237,243,0.50)',
-    width: 96,
+    width: 82,
+    flexShrink: 0,
     marginTop: 10,
   },
   feedMsg: {
     flex: 1,
+    minWidth: 0,
     marginTop: 0,
     lineHeight: 18,
     flexShrink: 1,
   },
   actionsRow: {
-    flexDirection: 'row',
-    gap: 12,
+    width: '100%',
     marginTop: 4,
   },
   actionBtn: {
-    flex: 1,
     paddingVertical: 14,
+    minHeight: 54,
     borderRadius: 14,
     backgroundColor: 'rgba(17,25,39,0.85)',
     borderWidth: 1,
     alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 10,
+  },
+  actionBtnStart: {
+    borderColor: 'rgba(0,255,198,0.45)',
+  },
+  actionBtnStop: {
+    borderColor: 'rgba(255,59,59,0.45)',
   },
   actionText: {
     fontSize: 14,
     fontWeight: '900',
     letterSpacing: 0.8,
   },
+  actionTextStart: {
+    color: ACCENT,
+  },
+  actionTextStop: {
+    color: ALERT,
+  },
   footerMono: {
     marginTop: 10,
     color: 'rgba(230,237,243,0.45)',
     fontSize: 11,
     fontFamily: 'monospace',
+    flexShrink: 1,
   },
 });

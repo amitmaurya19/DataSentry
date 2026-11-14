@@ -73,20 +73,38 @@ class VpnModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         pendingStartPromise = null
       }
       pendingStartPromise = promise
-      activity.startActivityForResult(prepareIntent, REQ_VPN_PREPARE)
+      try {
+        activity.startActivityForResult(prepareIntent, REQ_VPN_PREPARE)
+      } catch (t: Throwable) {
+        pendingStartPromise = null
+        promise.reject("VPN_PERMISSION_REQUEST_FAILED", "Could not request VPN permission.", t)
+      }
       return
     }
 
     // Permission already granted
-    startServiceInternal()
-    promise.resolve(true)
+    try {
+      startServiceInternal()
+      promise.resolve(true)
+    } catch (t: Throwable) {
+      promise.reject("VPN_START_FAILED", "Could not start VPN service.", t)
+    }
   }
 
   @ReactMethod
   fun stopVpn(promise: Promise) {
-    val stopIntent = Intent(ctx, VpnPacketCaptureService::class.java).apply { action = VpnPacketCaptureService.ACTION_STOP }
-    ctx.startService(stopIntent)
-    promise.resolve(true)
+    try {
+      val stopIntent = Intent(ctx, VpnPacketCaptureService::class.java).apply { action = VpnPacketCaptureService.ACTION_STOP }
+      ctx.startService(stopIntent)
+      promise.resolve(true)
+    } catch (t: Throwable) {
+      promise.reject("VPN_STOP_FAILED", "Could not stop VPN service.", t)
+    }
+  }
+
+  @ReactMethod
+  fun getVpnStatus(promise: Promise) {
+    promise.resolve(VpnPacketCaptureService.getVpnStatus())
   }
 
   @ReactMethod
@@ -109,8 +127,12 @@ class VpnModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     if (p == null) return
 
     if (resultCode == Activity.RESULT_OK) {
-      startServiceInternal()
-      p.resolve(true)
+      try {
+        startServiceInternal()
+        p.resolve(true)
+      } catch (t: Throwable) {
+        p.reject("VPN_START_FAILED", "Could not start VPN service.", t)
+      }
     } else {
       p.reject("VPN_DENIED", "User denied VPN permission.")
     }
