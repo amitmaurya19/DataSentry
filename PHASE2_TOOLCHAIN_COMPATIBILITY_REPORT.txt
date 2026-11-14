@@ -1,0 +1,177 @@
+DataSentry Phase 2 - Stage 1.5 Toolchain Compatibility Audit
+Date: 2026-11-13
+Scope: Read-only inspection of the Stage 0/1 reports, project configuration, locked packages, installed React Native package files, and official version-specific documentation. This report is the only new workspace file.
+
+EXECUTIVE FINDING
+
+The checked-in Android setup matches the official React Native Community Template 0.83-stable baseline: Gradle 9.0.0, Android Gradle Plugin (AGP) 8.12.0, Kotlin Gradle Plugin (KGP) 2.1.20, NDK 27.1.12297006, Build Tools 36.0.0, minSdk 24, compileSdk 36, and targetSdk 36. React Native 0.83.1 and its Gradle plugin are locked to 0.83.1. The upstream template confirms Gradle 9.0.0 and the Android SDK values; React Native 0.83.1's version catalog confirms AGP 8.12.0 and Kotlin 2.1.20. [S1][S2]
+
+Two qualifications prevent calling the whole matrix fully certified:
+- Kotlin's current official full-support table for KGP 2.1.20 ends at Gradle 8.12.1 and AGP 8.7.2. The official RN 0.83 configuration uses Gradle 9.0.0 and AGP 8.12.0 anyway. Kotlin says newer Gradle/AGP versions may be used, but deprecation warnings or unsupported features can occur. This is outside Kotlin's fully supported matrix, not documented as a hard incompatibility. [S3]
+- AGP 8.12 supports compiling through API 36 only. API 37 can be a runtime test target with minSdk 24 and targetSdk 36, but compiling against or targeting API 37 requires a newer Android toolchain and has no documented support from React Native 0.83.1's Android baseline. [S4][S5]
+
+No Gradle build or device test was run. The Stage 1 report records that Android Studio and Android SDK components are absent. Therefore none of the combinations below is claimed to have been locally built or device-verified. React Native 0.83.x is currently marked unsupported in the React Native release schedule. [S6]
+
+1. EXISTING VERSION INVENTORY
+
+JavaScript and React Native:
+- package.json: react-native 0.83.1, React 19.2.0, @react-native/new-app-screen 0.83.1. package.json permits Node >=20.
+- package-lock.json: react-native 0.83.1; @react-native/gradle-plugin 0.83.1; React 19.2.0. The installed package metadata for RN and the Gradle plugin requires Node >=20.19.4. The Stage 1 environment's Node 24.18.0 meets that requirement.
+- Locked native packages: react-native-gesture-handler 2.30.0; react-native-linear-gradient 2.8.3; react-native-reanimated 4.2.2; react-native-safe-area-context 5.7.0; react-native-svg 15.15.3; react-native-worklets 0.7.4.
+- Existing node_modules/react-native/gradle/libs.versions.toml (inside the installed RN package, not in the app's android/gradle directory): minSdk 24, compileSdk 36, targetSdk 36, Build Tools 36.0.0, NDK 27.1.12297006, AGP 8.12.0, Kotlin 2.1.20.
+- Existing node_modules/@react-native/gradle-plugin/gradle/libs.versions.toml: AGP 8.12.0 and Kotlin 2.1.20. Its Gradle plugin build declares AGP and KGP as implementation dependencies at those catalog versions.
+
+Android project:
+- android/gradle/wrapper/gradle-wrapper.properties: Gradle 9.0.0.
+- android/build.gradle: ext values are Build Tools 36.0.0, minSdk 24, compileSdk 36, targetSdk 36, NDK 27.1.12297006, kotlinVersion 2.1.20. The Gradle classpath declarations omit literal versions; they match the official RN template pattern and the RN Gradle plugin supplies its AGP/KGP versions.
+- android/settings.gradle: includes the React Native Gradle plugin from ../node_modules/@react-native/gradle-plugin. No app-level gradle/libs.versions.toml or android/gradle/libs.versions.toml exists.
+- android/gradle.properties: newArchEnabled=true and hermesEnabled=true.
+- android/app/build.gradle: uses the root compile/min/target/NDK/Build Tools values. Native ABI outputs are configured for armeabi-v7a and arm64-v8a.
+- Android source includes Kotlin VpnService/NetworkStatsManager/TrafficStats code. The source inspected uses platform APIs available by the declared API 24 minimum; runtime behavior across API 24-37 is not device-verified.
+- Stage 1 environment snapshot: Oracle Java 21.0.11 is on PATH; JAVA_HOME is unset. ANDROID_HOME and ANDROID_SDK_ROOT are unset; Android Studio, Android SDK, adb, and system Gradle were not found in the checked standard locations. Device presence could not be determined without adb. npm ci had succeeded and the RN Gradle plugin was present, but Gradle was not run.
+
+2. COMPATIBILITY MATRIX
+
+Component/version | Official requirement or range | Assessment for this project
+------------------|--------------------------------|----------------------------
+React Native 0.83.1 | RN 0.83 versioned environment guide says Node 20.19.4+ and recommends JDK 17; package engine also says Node >=20.19.4. | Node 24.18.0 is within the documented range. RN 0.83.x is now marked unsupported by the RN release schedule. [S6][S7]
+RN Android template | Official 0.83-stable template uses Gradle 9.0.0, min/compile/target 24/36/36, Build Tools 36.0.0, NDK 27.1.12297006, and Kotlin 2.1.20. | Project matches this template baseline. This is evidence of the RN-maintained template choice, not evidence that this workspace has built successfully. [S1]
+Gradle 9.0.0 | Gradle 9.0 requires JVM 17+. Gradle 8.5 and later support running on Java 21. AGP 8.12 requires Gradle 8.13 minimum; Gradle 9.0 is above that minimum. Gradle 9.0's minimum plugin requirements are AGP 8.4 and KGP 2.0. | Gradle 9.0 + JDK 21 meets Gradle's documented runtime requirements and the AGP minimum. No official AGP maximum Gradle version is stated in the cited compatibility table. KGP 2.1.20's fully supported Gradle range does not extend to 9.0; see below. [S4][S8]
+AGP 8.12.0 | AGP 8.12 supports up to API 36; minimum/default Gradle 8.13; default Build Tools 35.0.0; default NDK 27.0.12077973; minimum/default JDK 17. | compileSdk 36 is at its supported maximum. Explicit Build Tools 36.0.0 and NDK 27.1.12297006 are project/RN overrides and match the RN 0.83 catalog. [S4]
+KGP 2.1.20 | Kotlin's current official table lists full support for Gradle 7.6.3-8.12.1 and AGP 7.3.1-8.7.2. Kotlin also says newer Gradle/AGP may work, with possible deprecations or unsupported features. | The RN 0.83 template deliberately selects KGP 2.1.20 with AGP 8.12.0 and Gradle 9.0.0. This is outside KGP's listed full-support bounds, but is not labeled a hard incompatibility by Kotlin. Treat the exact app build as unverified. [S2][S3]
+JDK 21 | Gradle supports Java 21 when running from Gradle 8.5 onward; AGP 8.12 lists JDK 17 as its minimum/default. RN 0.83 docs recommend JDK 17 and caution that higher versions may cause problems. | JDK 21 is not too new for Gradle 9.0 and is above AGP's minimum. RN does not recommend it, so it is a valid test candidate rather than an officially preferred RN setup. [S4][S7][S8]
+Android SDK 36 / Build Tools 36.0.0 | RN 0.83.1 catalog explicitly pins these. AGP 8.12 supports API 36. | Exact match; required for the existing configuration. [S2][S4]
+NDK 27.1.12297006 | RN 0.83.1 catalog explicitly pins it. AGP 8.12's default is 27.0.12077973 but allows a project to configure another side-by-side NDK. | Exact RN template match; install the pinned 27.1 version rather than replacing it with the AGP default. [S2][S4][S9]
+Android API 37 compile/target | Android's AGP table says API 37 requires AGP 9.1.1 and Android Studio Panda 3 (2025.3.3 Patch 1) or newer. AGP 9.1.1 requires Gradle 9.3.1. Android's API 37 setup guide requests the API 37 platform and latest Build Tools 37.x.x. | AGP 8.12 is below the API 37 minimum and maxes out at API 36. API 37 compile/target is incompatible with current AGP 8.12. [S5][S10]
+
+3. NATIVE DEPENDENCIES AND RISKS
+
+- react-native-gesture-handler 2.30.0: its 2.x support table says 2.28.0+ works with RN 0.79.0+, so RN 0.83 is in range. Its Android Gradle file inherits root minSdk and Kotlin version; default minSdk is 24. [S11]
+- react-native-reanimated 4.2.2 and react-native-worklets 0.7.4: Reanimated's exact package compatibility.json lists Reanimated 4.2.x with RN 0.80-0.84 and Worklets 0.7.x. The app's RN 0.83.1 / Worklets 0.7.4 pair is within that range. Reanimated 4 and Worklets require New Architecture; android/gradle.properties has newArchEnabled=true. [S12]
+- Babel config currently uses react-native-reanimated/plugin. Reanimated's CLI setup recommends react-native-worklets/plugin last; the old export is retained for backwards compatibility. This is a recommended configuration cleanup, not a proven build blocker. [S12]
+- Reanimated's Windows Android guide requires CMake 3.22.1 or newer, Ninja 1.12.0 or newer, and recommends the NDK from the RN template. These are environment components in addition to Platform/Build Tools/NDK. [S13]
+- react-native-safe-area-context 5.7.0 and react-native-svg 15.15.3: package peer ranges are broad. Their Android Gradle files default to minSdk 16, so the app's minSdk 24 is higher. SVG's official README documents Fabric support for RN 0.69+. No exact RN 0.83.1 matrix was found for safe-area-context, and no per-patch 0.83.1 result was found for SVG; their exact build/runtime compatibility is not proven here. [S14][S15]
+- react-native-linear-gradient 2.8.3: package peer ranges are broad and its Android Gradle default minSdk is 21, below the app's 24. Its 2.8.3 changelog's example used RN 0.70.12; no official RN 0.83 support matrix was found. Retain the locked version for now, but treat its RN 0.83/New Architecture build compatibility as unverified. [S16]
+- The app's minSdk 24 meets or exceeds the Android minimums in the inspected native package Gradle files. This does not replace API 24 and API 37 runtime tests.
+
+4. IDENTIFIED CONFLICTS AND RISKS
+
+1. KGP matrix gap: KGP 2.1.20's full-support range does not cover AGP 8.12 or Gradle 9.0, although both are selected in the official RN 0.83 template. Kotlin permits use of newer versions with caveats. This is an explicit documentation mismatch, not proof that the build fails. [S1][S3]
+2. API 37 compile ceiling: AGP 8.12 supports API 36 maximum. Setting compileSdk 37 or targetSdk 37 while retaining AGP 8.12 is unsupported. [S4][S5]
+3. API 37 runtime is not yet verified: minSdk 24 makes API 24 the install floor; Android normally permits an app targeting API 36 to run on newer APIs, with compatibility behavior for the older target. Android 17 changes still require testing. [S17]
+4. RN lifecycle: RN 0.83.x is currently listed as unsupported. Staying on 0.83.1 preserves the user's requested code baseline but no longer receives the current RN support cycle. [S6]
+5. Native build components: no Stage 1 build was performed. CMake/Ninja, NDK compilation, Kotlin compilation, SDK resolution, and package autolinking are not locally proven. The previous report also records that Android Studio/SDK/adb were absent. [S13]
+6. Dependency compatibility: Reanimated/Worklets and Gesture Handler have positive documented RN compatibility. Safe-area-context and Linear Gradient do not publish a sufficiently specific exact-RN compatibility result in the sources checked; do not call all installed native modules verified.
+
+5. RECOMMENDED STABLE COMBINATION
+
+For preserving RN 0.83.1 and supporting runtime testing across Android API 24-37, keep the official RN 0.83 template stack unchanged:
+- Node.js >=20.19.4 (the existing Node 24.18.0 qualifies).
+- Gradle Wrapper 9.0.0.
+- AGP 8.12.0.
+- KGP 2.1.20.
+- JDK 21 may be retained for a first controlled build attempt; JDK 17 remains the RN-documented conservative choice.
+- SDK Platform 36; Build Tools 36.0.0; NDK 27.1.12297006.
+- CMake >=3.22.1 and Ninja >=1.12.0 for the Reanimated C++ build.
+- minSdk 24, compileSdk 36, targetSdk 36.
+- Android Studio Narwhal Feature Drop 2025.1.2 or newer supports AGP 8.12; use Panda 3 (2025.3.3 Patch 1) or newer if setting up Android API 37 tooling/emulators.
+
+This is the closest low-change recommendation because it exactly follows RN 0.83's template and its package catalog. It is not described as fully in Kotlin's standalone supported-version matrix, and no successful build/device run exists in the workspace. Retaining JDK 21 is reasonable from the Gradle/AGP runtime floors, but the first actual build must decide whether this RN project works with the Oracle JDK 21 installation. [S1][S2][S3][S4][S7][S8][S13]
+
+There is no combination that can be claimed from the cited documentation as simultaneously (a) within Kotlin 2.1.20's full-support table, (b) using RN 0.83.1's AGP 8.12/API 36 baseline, and (c) compiling/targeting API 37. Resolving all three would require changing the RN Android toolchain and/or React Native version, then building and testing that combination. Do not make those changes as part of this read-only audit.
+
+6. JDK 21 AND JDK 17
+
+- Can Oracle JDK 21 be retained? Yes, as a test candidate. Gradle 9.0 requires Java 17 or newer and Gradle's compatibility table supports Java 21 from Gradle 8.5 onward. AGP 8.12 documents JDK 17 as its minimum/default, not as a maximum. These facts make JDK 21 technically plausible; they do not prove this RN project builds with it. RN 0.83's environment guide explicitly recommends JDK 17 and warns higher JDK versions may cause problems. [S4][S7][S8]
+- Is JDK 17 actually necessary? No, not as a Gradle 9/AGP 8.12 minimum: JDK 21 meets those minimums. JDK 17 is the conservative documented React Native environment. Keep 21 initially if the priority is reusing the existing Oracle JDK; if the build fails, compare with JDK 17 before changing project dependencies.
+
+7. REQUIRED ANDROID STUDIO VERSION
+
+- Current RN/AGP 8.12/API 36 build: Android Studio Narwhal Feature Drop 2025.1.2 is the first listed Studio release supporting AGP through 8.12. Use this or newer.
+- API 37 SDK development: Android Studio Panda 3, version 2025.3.3 Patch 1, and AGP 9.1.1 are listed as the API 37 minimums. A current newer Studio can be used, but it does not make AGP 8.12 support API 37 compilation. [S5]
+
+8. EXACT SDK COMPONENTS
+
+For the recommended RN 0.83/API 36 build:
+- Android SDK Platform 36.
+- Android SDK Build-Tools 36.0.0.
+- Android SDK Platform-Tools (adb).
+- Android SDK Command-line Tools (latest).
+- NDK (Side by side) 27.1.12297006.
+- CMake 3.22.1 or newer and Ninja 1.12.0 or newer for Reanimated on Windows.
+- API 37 emulator/system image or a physical API 37 phone for runtime testing; this is a test target and does not change compileSdk/targetSdk.
+
+If a separate approved project later needs to compile against API 37, Android's current minimum stack is Android Platform 37, Build Tools 37.x.x (latest per Android 17 setup), AGP 9.1.1+, Gradle 9.3.1+, and Android Studio Panda 3 Patch 1+. AGP 9.1.1's default NDK is 28.2.13676358. A compatible Kotlin/AGP9 configuration and RN 0.83.1 integration still require verification; these tool versions alone do not establish that RN 0.83.1 supports API 37. [S5][S10]
+
+9. ANDROID API 24-37 SUPPORT STRATEGY
+
+Android's version fields have different meanings:
+- minSdk 24: lowest API level that can install the app. It establishes the intended API 24 floor, subject to app/library runtime checks.
+- compileSdk 36: APIs available to source compilation and lint. It is not the lowest or highest Android version on which the APK can run.
+- targetSdk 36: declares the Android behavior level against which the app has opted to be tested. On newer Android versions, compatibility behavior may apply until the target is raised.
+
+For a goal of installing/running on devices from API 24 through API 37, retain minSdk 24 and the existing compileSdk/targetSdk 36 initially; install/test on API 24, representative middle versions, API 36, and API 37. This is a runtime-support strategy, not proof of API 37 compatibility. API 37-targeted behavior or use of API 37-only APIs requires compileSdk/targetSdk 37 and the newer toolchain above. [S17][S5]
+
+10. PROJECT CHANGES SEPARATE FROM ENVIRONMENT INSTALLS
+
+No project change is required merely to install an API 36-built app on a higher-API device in principle. Preserve the current SDK values for the first build and device verification.
+
+If the separate requirement becomes compile/target API 37, proposed project configuration changes (not performed):
+1. Raise compileSdk and targetSdk from 36 to 37; leave minSdk 24 unless runtime testing identifies an API floor problem.
+2. Upgrade AGP from 8.12.0 to at least 9.1.1 and the wrapper from Gradle 9.0.0 to at least 9.3.1.
+3. Adopt a Kotlin arrangement compatible with the selected AGP9 configuration. Kotlin's current table shows KGP 2.4.20-2.4.21 supports AGP through 9.3.1 and Gradle through 9.7, but RN 0.83.1's plugin catalog remains KGP 2.1.20; overriding it is not an officially verified RN 0.83.1 combination.
+4. Set/install API 37 Build Tools 37.x.x and evaluate NDK 28.2.13676358 versus RN 0.83.1's pinned NDK 27.1.12297006 through an actual build and native-library checks.
+5. Update Babel config to the explicit Worklets Babel plugin only if desired; current alias is retained for backwards compatibility.
+
+These are investigation proposals only. Do not apply them without a separately approved implementation and build-test stage.
+
+VERIFICATION STATUS
+
+- Read only: yes, except creating this requested report.
+- Application/configuration/dependency files modified: no.
+- Build run: no.
+- Device/API matrix run: no.
+- Version compatibility asserted as locally verified: no.
+- Prior environment status: Android Studio/SDK/adb unavailable per PHASE2_STAGE1_BUILD_REPORT.txt.
+
+OFFICIAL SOURCES
+
+[S1] React Native Community Template, 0.83-stable Android wrapper and build.gradle:
+https://raw.githubusercontent.com/react-native-community/template/0.83-stable/template/android/gradle/wrapper/gradle-wrapper.properties
+https://raw.githubusercontent.com/react-native-community/template/0.83-stable/template/android/build.gradle
+[S2] React Native v0.83.1 Android version catalog:
+https://raw.githubusercontent.com/facebook/react-native/v0.83.1/packages/react-native/gradle/libs.versions.toml
+[S3] Kotlin Gradle Plugin compatibility table:
+https://kotlinlang.org/docs/gradle-configure-project.html
+[S4] Android Gradle Plugin 8.12.0 release notes and compatibility table:
+https://developer.android.com/build/releases/agp-8-12-0-release-notes
+[S5] Android Gradle Plugin/Studio/API-level compatibility table:
+https://developer.android.com/build/releases/about-agp
+[S6] React Native release support status:
+https://reactnative.dev/releases/
+[S7] React Native 0.83 versioned environment guide:
+https://reactnative.dev/docs/0.83/set-up-your-environment
+[S8] Gradle Java compatibility and Gradle 9.0 requirements:
+https://docs.gradle.org/current/userguide/compatibility.html
+https://docs.gradle.org/current/userguide/upgrading_major_version_9.html
+[S9] Android NDK side-by-side installation/version management:
+https://developer.android.com/studio/projects/install-ndk
+[S10] Android 17 / API 37 SDK setup:
+https://developer.android.com/about/versions/17/setup-sdk
+[S11] React Native Gesture Handler 2.x installation and React Native support table:
+https://docs.swmansion.com/react-native-gesture-handler/docs/2.x/fundamentals/installation/
+[S12] Reanimated 4.x compatibility and setup:
+https://docs.swmansion.com/react-native-reanimated/docs/guides/compatibility/
+https://docs.swmansion.com/react-native-reanimated/docs/fundamentals/getting-started/
+[S13] Reanimated 4.x Windows Android build requirements:
+https://docs.swmansion.com/react-native-reanimated/docs/guides/building-on-windows/
+[S14] React Native SVG project README:
+https://github.com/software-mansion/react-native-svg/blob/main/README.md
+[S15] React Native Safe Area Context project README:
+https://github.com/AppAndFlow/react-native-safe-area-context/blob/main/README.md
+[S16] React Native Linear Gradient 2.8.3 changelog:
+https://github.com/react-native-linear-gradient/react-native-linear-gradient/blob/master/CHANGELOG.md
+[S17] Android uses-sdk/minSdk/targetSdk behavior:
+https://developer.android.com/guide/topics/manifest/uses-sdk-element
+
+End of Stage 1.5 report. Stop here and wait for approval.
