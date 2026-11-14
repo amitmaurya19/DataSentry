@@ -1,0 +1,378 @@
+DATASENTRY TECHNICAL AND SECURITY AUDIT
+
+Audit date: 2026-11-13
+Scope: Static, read-only review of the repository at C:/Users/Krishna/Desktop/DataSentry
+Deliverable: AUDIT_REPORT.txt
+
+AUDIT METHOD AND LIMITS
+
+The application source, native Android source, Android manifest and build files, React Native configuration, package manifest and lockfile, README, and available resource/test files were inspected. No source files were changed. No build, install, runtime test, lint, or test suite was run. No Android SDK, adb, node_modules, or iOS project is present in the workspace. The host exposes Java 21.0.11; ANDROID_HOME, ANDROID_SDK_ROOT, and JAVA_HOME are unset. Accordingly, all runtime and binary packaging conclusions that require an APK, device, or merged manifest are marked as potential or cannot verify.
+
+The working tree already contained a tracked deletion of __tests__/App.test.tsx before this audit began. It is not an audit change. The only file created by this audit is this report.
+
+Classification terms: CONFIRMED ISSUE means the source/configuration directly demonstrates the defect or gap. POTENTIAL ISSUE means the risk depends on runtime, platform, or build behavior not available to verify here. CANNOT VERIFY means the project lacks the SDK, artifact, or runtime evidence necessary to make a compatibility claim.
+
+1. EXECUTIVE SUMMARY
+
+DataSentry is a React Native Android dashboard and Kotlin VPN/traffic-statistics simulator. It does not implement packet payload capture. VpnPacketCaptureService establishes a narrowly routed TUN interface but never reads the TUN file descriptor; its events come from Android NetworkStatsManager and TrafficStats byte counters. The dashboard and README call these events packet capture/packet telemetry, which is not supported by the implementation.
+
+The most important confirmed findings are:
+- The long-running VpnService is never promoted to a foreground service. Android requires VPN services on supported versions to promote themselves; the current service can be stopped by the OS and has no ongoing notification.
+- The app does not read or forward packets. The VPN route covers only 10.0.0.0/24 and only DataSentry is included. Normal internet traffic from other apps is excluded, and ordinary DataSentry internet destinations do not match the TUN route.
+- Release builds use the committed default debug keystore and its public default credentials.
+- Alerts are derived from moving 15-second operating-system aggregates and global TX counters, not packets. The displayed >1200B / 2-second frequency rule is absent from the native implementation.
+- Android 17 is officially released as API 37, but this project compiles and targets API 36. No API 37 or 16 KB page-size result is available; the local environment has no Android SDK/device tooling.
+- No tests are present in the working tree; the tracked App.test.tsx is deleted in the pre-existing working tree state.
+
+No user registration, login, backend authentication, API authorization, token/session handling, or credential storage exists in the inspected source. Android VPN consent and Usage Access are operating-system permissions, not user authentication.
+
+Finding totals: 16
+Severity: CRITICAL 0 | HIGH 3 | MEDIUM 5 | LOW 8 | INFORMATIONAL 0
+Priority: P0 0 | P1 4 | P2 7 | P3 5
+
+This is suitable only as a local demonstration of OS traffic counters and a dashboard. It is not a packet-inspection VPN or a production security-monitoring system. Android 17 readiness and release signing are not established.
+
+2. PROJECT ARCHITECTURE AND COMPONENT OVERVIEW
+
+Repository layout and purpose:
+- App.tsx: One React Native screen. It owns VPN status, alert count, a 60-event in-memory feed, user actions, event subscriptions, and styles/animations. It receives UPLOAD_DETECTED and VPN_STATUS events through NativeEventEmitter.
+- index.js: Registers App with React Native and loads react-native-gesture-handler first.
+- android/app/src/main/java/com/datasentry/MainActivity.kt: ReactActivity host named "datasentry".
+- MainApplication.kt: Creates the React host, loads React Native, and manually adds datasentryPackage().
+- MobileSocNativePackage.kt: Legacy ReactPackage exposing VpnModule; no native view managers.
+- VpnModule.kt: React Native native module. Checks Usage Access, opens Usage Access settings when absent, requests VpnService.prepare consent, starts/stops VpnPacketCaptureService, and plays a short tone.
+- VpnPacketCaptureService.kt: Android VpnService. Establishes a TUN interface and runs a polling thread querying NetworkStatsManager and TrafficStats. It does not read the TUN descriptor or implement a VPN gateway/forwarder.
+- EventBridge.kt: Process-wide singleton that pushes native events to the active React context or queues them until a context exists.
+- AndroidManifest.xml: Declares INTERNET, FOREGROUND_SERVICE, VIBRATE, PACKAGE_USAGE_STATS, the launcher Activity, and the VPN service.
+- android/build.gradle, app/build.gradle, settings.gradle, gradle wrapper, gradle.properties: Android/React Native build and ABI settings.
+- package.json / package-lock.json: React Native dependency graph and scripts. package-lock contains 991 package entries.
+- jest.config.js / jest.setup.js: Jest test configuration and mocks exist, but there are no test files in the working tree.
+- assets and Android res/mipmap files: App icon resources. No backend, iOS project, database, auth module, network-security XML, broadcast receiver, or content provider was found.
+
+Build versions from repository configuration:
+- minSdk 24 (Android 7.0), compileSdk 36, targetSdk 36, build tools 36.0.0.
+- React Native 0.83.1, React 19.2.0, Hermes enabled, New Architecture enabled.
+- NDK 27.1.12297006; Kotlin 2.1.20; Gradle wrapper 9.0.0.
+- The Android Gradle Plugin version is not written explicitly in this repository's buildscript classpath. The React Native 0.83.1 Gradle version catalog pins AGP 8.12.0; effective resolution was not built locally.
+- README says JDK 17; host Java observed during audit is 21.0.11. The project does not pin the JDK.
+- edgeToEdgeEnabled=false in gradle.properties; this does not opt a target-36 app out of Android 16 edge-to-edge enforcement.
+- Gradle release minification and resource shrinking are enabled. Release signing nevertheless points at the debug signing config.
+- ABI splits are enabled with universalApk=false and only armeabi-v7a / arm64-v8a included.
+- No direct AndroidX dependency is declared in app/build.gradle. React Native and native libraries bring AndroidX/native artifacts transitively. Native modules include Reanimated/Worklets, gesture handler, safe-area context, and linear gradient. Hermes and React Native also contribute native libraries.
+
+3. COMPLETE APPLICATION DATA FLOW
+
+1. App.tsx mounts a NativeEventEmitter for VpnModule and subscribes to UPLOAD_DETECTED and VPN_STATUS. Status defaults to STOPPED; no native status snapshot is requested on mount.
+2. On Start VPN, App.tsx calls VpnModule.startVpn(). The module requires a foreground Activity and first checks OPSTR_GET_USAGE_STATS. If denied, it launches Android Usage Access settings and rejects the JavaScript Promise; the user must return and tap Start again.
+3. If Usage Access is enabled, VpnService.prepare(activity) is called. Android presents VPN consent if needed. onActivityResult starts the service after approval or rejects after denial. If VPN consent is already present, the service is started directly.
+4. VpnPacketCaptureService.onStartCommand calls startCapture(), marks the state active, configures a TUN address 10.0.0.2/32, MTU 1500 and route 10.0.0.0/24, allows bypass, and adds only the DataSentry package to the VPN's allowed-application set. The TUN descriptor is stored but never read or written.
+5. A daemon thread polls roughly every 1.5 seconds. It compares TrafficStats.getTotalTxBytes() with the prior sample and queries per-UID NetworkStatsManager summaries for the preceding 15 seconds over Wi-Fi and mobile networks. It emits when a per-UID delta reaches 120,000 bytes or global device TX delta reaches 300,000 bytes. Severity is assigned at 300,000 and 1,000,000 bytes.
+6. If a threshold is reached, the native code selects an app UID (or falls back to another UID / system UID), resolves a package name and label where possible, and emits size, timestamp, severity, UID, package, label, and deviceTotalDeltaBytes through EventBridge.
+7. EventBridge emits to React Native on the UI thread when the JS runtime is active. Otherwise, it appends events to a process-global unbounded queue. App.tsx normalizes the event, increments the alert count, stores at most 60 feed rows, shows a toast, vibrates, and asks VpnModule to play a tick.
+8. Stop VPN sends ACTION_STOP to the service, which closes the PFD, interrupts the polling thread, emits STOPPED, and stops itself. onRevoke also stops the capture state. A network change callback/reconnect loop is not implemented; because the app does not forward packets, this is not a working gateway lifecycle.
+
+4. AUTHENTICATION AND AUTHORIZATION ANALYSIS
+
+Authentication is NOT implemented. No registration or login UI, username/password handling, API keys, access or refresh tokens, JWT parsing, OAuth, sessions, backend client, user identity store, or API authorization checks were found. There is no backend endpoint in the project. No sensitive user credential is stored locally; Android Keystore is not used because there is no credential to protect. No app-specific hardcoded API secret was found.
+
+The default Android debug signing credentials in app/build.gradle are not user authentication credentials; they are a release-signing problem described in DS-003. INTERNET permission does not establish a backend or authenticated API.
+
+Android VPN consent and Usage Access are OS-level authorization gates for device features. They do not identify a user to DataSentry, protect an API, or create an app session. PACKAGE_USAGE_STATS is user-granted through Settings, and the code checks AppOps before reading cross-app traffic summaries.
+
+Future authentication recommendation: If DataSentry becomes a multi-user or cloud-synced product, authenticate through a backend. Verify passwords server-side with Argon2id and unique salts; rate-limit login and recovery; add MFA/passkeys according to product risk. Return short-lived, audience-scoped access tokens and rotate opaque refresh tokens with server-side hashes, reuse detection, expiration, and revocation. Enforce authorization/RBAC on every backend resource; never trust roles supplied only by the client. Require HTTPS and normal platform certificate validation. Store only refresh/session material in Android Keystore-backed encrypted storage; never persist a user's password. Logout should revoke the server session and remove local tokens. For a device-only demo with no server data, user accounts add no meaningful authorization boundary and should not be simulated locally.
+
+5. ANDROID 17 COMPATIBILITY ASSESSMENT
+
+The Android Developers site reports Android 17 as released on 2026-06-16 and maps it to API 37. This repository remains compileSdk 36 / targetSdk 36. Android 17 can run older-target apps, but this repository has not been built with API 37, tested on API 37, or validated for API-37 target behavior. The workspace has no Android SDK environment variables or adb, so the required device validation could not be performed.
+
+| Android Version | API Level | Compatibility Status | Identified Issues | Required Action |
+|---|---:|---|---|---|
+| Android 17 | 37 | CANNOT VERIFY | Project compiles/targets 36; no API 37 build/device result. Foreground-service lifecycle issue persists. 16 KB native library alignment is unknown. API 37 target behavior and large-screen resizing are untested. | Compile/target with official API 37 tooling in CI; run phone, foldable/tablet and 16 KB page-size tests; verify FGS, insets, and final APK native ELF alignment. |
+| Android 16 | 36 | CONFIRMED ISSUE | targetSdk is 36, so edge-to-edge opt-out is disabled. The VPN service is not promoted to foreground. Native 16 KB compatibility cannot be verified. | Fix service lifecycle/type permissions; validate insets and UI on API 36; inspect/test 16 KB artifacts. |
+| Android 15 | 35 | CONFIRMED ISSUE | targetSdk 36 activates Android 15+ edge-to-edge behavior. VPN foreground promotion is absent. 16 KB devices are supported by the platform, but native libraries were not checked. | Validate UI bars/cutouts, foreground-service lifecycle, and 16 KB devices. |
+| Android 14 | 34 | CONFIRMED ISSUE | VPN service is not promoted. The manifest declares specialUse but lacks FOREGROUND_SERVICE_SPECIAL_USE; promotion using that type would fail permission checks. | Promote the VPN service and declare/use an eligible FGS type and its exact permission. Verify Play Console FGS disclosures if distributed through Play. |
+| Minimum supported Android 7.0 | 24 | POTENTIAL ISSUE | VpnService and NetworkStatsManager APIs exist above this minimum, but there is no API 24 device/build result. Android 8+ introduces the VPN foreground-service lifetime requirement. | Exercise consent, Usage Access, route setup, stop/revoke, and monitoring on API 24 and API 26+ devices. |
+
+Android 17 targeting details: API 37-targeted apps on large displays must adapt to resizing/orientation; this app has a single flex-based dashboard but no large-screen validation. The code does not use Android APIs introduced in API 37. A target-36 APK may run on Android 17 with compatibility behavior, but that is not evidence of target-37 compatibility.
+
+16 KB page sizes: Android supports 16 KB devices beginning with Android 15. The project uses NDK 27.1 and React Native/Hermes native binaries. The source tree does not include the built .so artifacts or evidence of 16 KB ELF alignment. Android guidance says NDK r28+ aligns by default and earlier NDKs need the documented linker settings; prebuilt libraries must also be aligned. Therefore compatibility is CANNOT VERIFY until an APK/AAB is inspected and run on a 16 KB image/device.
+
+DS-005 | MEDIUM | P1 | CANNOT VERIFY | Android 17 / native compatibility
+Affected: android/build.gradle:3-8; android/app/build.gradle:75-84,110-117; android/gradle.properties:27-44
+Evidence: compileSdkVersion=36 and targetSdkVersion=36. NDK is 27.1.12297006. React Native/Hermes bring native libraries. No Android SDK/adb or built APK/AAB is available in this workspace.
+Technical explanation: The project does not compile or target API 37, so API-37 target behavior is not exercised. Android 17 may run a target-36 app, but that is not proof of the requested Android 17 compatibility. Native ELF alignment and prebuilt .so compatibility with 16 KB pages cannot be inferred from Kotlin source.
+Impact: API 37 changes, large-screen behavior, and native loading on 16 KB devices may fail or behave differently; current configuration does not establish support.
+Recommended correction: Build with API 37, test on API 37 devices/emulators and large screens, inspect every packaged native library for required 16 KB alignment, then run on a 16 KB system image/device. Confirm all transitive native libraries, not only app-authored code.
+Prerequisites: Android SDK 37/NDK/build tooling in CI, device images, and final package artifacts. Android 17 SDK/platform is officially released as of this audit; local tooling is absent.
+
+6. ANDROID 14-16 COMPATIBILITY ASSESSMENT
+
+- API levels: Android 14=34, Android 15=35, Android 16=36. Configured minSdk 24 means installation is intended from API 24 onward.
+- VpnService and VpnService.prepare are used with the system consent flow. The manifest includes the required BIND_VPN_SERVICE permission and android.net.VpnService action. The service is exported but protected by the signature-level BIND_VPN_SERVICE gate; it is not an unprotected arbitrary service entry point.
+- Android 8/API26 onward requires a VPN service to promote itself to foreground after launch. This code does not call startForeground and does not create an ongoing notification. This is DS-001.
+- On API34+ target apps must declare the specific foreground-service type permission when using an FGS. Manifest currently declares specialUse and its subtype property but not FOREGROUND_SERVICE_SPECIAL_USE. A VPN use case may qualify for systemExempted only when the app meets Android's active-VPN eligibility. The appropriate type and permissions need to be selected rather than assuming the current manifest is sufficient.
+- POST_NOTIFICATIONS is not present. It is not by itself required to start an FGS, but the app currently has no notification channel or notification at all, so the expected persistent VPN user disclosure is absent.
+- PACKAGE_USAGE_STATS is a special system-level Usage Access grant, not an ordinary runtime permission. VpnModule checks AppOps and routes the user to settings. NetworkStatsManager queries other UIDs only with this access. Android calls can throw SecurityException; the service logs and continues with empty/partial results.
+- NetworkStatsManager.querySummary exists from API23 and aggregates network use over the requested interval. It may take seconds and is run off the main thread, which is appropriate. Comparing adjacent overlapping 15-second windows is not a packet rate measurement and may repeat/blur events. TrafficStats.getTotalTxBytes is a device-wide TX counter, not per-app attribution.
+- ConnectivityManager.TYPE_WIFI and TYPE_MOBILE are used. The code does not use UsageStatsManager. No AppOps query is used to retrieve traffic data except checking the Usage Access mode.
+- Android 15 target behavior: edge-to-edge applies because targetSdk is 36. Android 16 target behavior: opt-out is disabled for target 36; gradle.properties edgeToEdgeEnabled=false is not an opt-out. SafeAreaProvider/useSafeAreaInsets are present and add top/bottom padding, but actual cutout/navigation-bar appearance is untested. See DS-010.
+- Package visibility: the app resolves labels for other UIDs using PackageManager calls but declares no <queries> or QUERY_ALL_PACKAGES. Android package visibility may prevent some label lookups; fallback to package name or uid exists. This is a low-risk attribution possibility (DS-014), not a claim that the stats API itself is blocked.
+- Battery/resource risk: while the loop sleeps for 1.5 seconds, NetworkStatsManager may take several seconds per summary query. There is no battery, CPU, or long-duration profiling. The implementation performs two queries per interval and has no adaptive poll/backoff.
+- No deprecated or removed API was found that clearly blocks API34-36. startActivityForResult and ConnectivityManager.TYPE_* are legacy/deprecated paths but remain available. Their effect is not a demonstrated compatibility failure.
+
+7. VPN IMPLEMENTATION FINDINGS
+
+The service configures a TUN interface (10.0.0.2/32, MTU 1500) but only routes 10.0.0.0/24 and includes only DataSentry's package. It intentionally avoids claiming the default route. No packet InputStream/OutputStream loop, parser, payload inspection, proxy, remote VPN gateway, forwarding, NAT, DNS handling, or tunnel socket is implemented. The established PFD is only assigned, closed, and set to null.
+
+Actual telemetry is OS accounting data. The service reads global TX deltas from TrafficStats and per-UID TX summaries from NetworkStatsManager; it does not inspect source/destination addresses, ports, TCP/UDP headers, packet boundaries, TLS/HTTP content, or data payload. Encrypted payload capture is therefore not happening. Calling the feature "packet capture" or "Capturing packets from VPN TUN interface" is misleading. README.md line 43 also says packet sizes are sampled from TUN, which conflicts with the implementation.
+
+The 15-second rolling summary queried each nominal 1.5 seconds is compared to the previous rolling summary. It is not a disjoint interval; repeated bytes can remain in multiple successive snapshots. Global TrafficStats delta may trigger an event for unrelated device traffic and can be attributed to the top observed UID or system fallback. Severity thresholds do not implement the dashboard's stated >1200B and frequency-in-2-seconds rule. These produce uncalibrated usage-spike indicators, not upload detection or packet-size anomalies.
+
+The service does close the PFD during stop/revoke and interrupts the polling thread. It returns START_STICKY, but has no foreground lifetime guarantee, notification, network callback/re-establishment, or persisted state. CPU/battery and attribution accuracy remain unmeasured.
+
+DS-002 | HIGH | P1 | CONFIRMED ISSUE | VPN data plane / feature correctness
+Affected: VpnPacketCaptureService.kt:46-76,78-121; App.tsx:184,291; README.md:5,43
+Evidence: TUN routes only 10.0.0.0/24, only the app package is allowed, and the established PFD is never read. The monitor instead queries NetworkStatsManager/TrafficStats. README and UI describe packet capture.
+Technical explanation: Ordinary internet destinations do not match the configured route, other apps are not included, and no packet-reading/forwarding loop exists. The implementation reports OS-aggregated byte counters, not packet payloads or packet sizes.
+Impact: Users can mistake aggregate upload counters for inspected packets or assume other apps are protected/monitored. The simulator does not provide packet-level detection or a full-tunnel privacy/security guarantee.
+Recommended correction: Decide whether product scope is OS-level aggregate telemetry or actual VPN inspection. For counter telemetry, rename/status the feature and explain attribution limitations. For packet inspection, design routes, read/parse TUN frames, provide a safe forwarding/gateway model, handle DNS and network changes, and preserve VPN consent/disclosure.
+Prerequisites: Product threat model, routing/forwarding architecture, traffic leak policy, battery/resource budget, user disclosure.
+
+DS-004 | MEDIUM | P2 | CONFIRMED ISSUE | Telemetry accuracy / anomaly logic
+Affected: VpnPacketCaptureService.kt:86-118,165-184,186-219; App.tsx:224
+Evidence: Native code queries a 15,000 ms summary every nominal 1,500 ms, compares adjacent rolling totals, triggers at 120,000 bytes per UID or 300,000 global bytes, and labels severity at 300,000/1,000,000. UI claims >1200B plus frequency in 2 seconds.
+Technical explanation: Android querySummary aggregates over its whole requested period. Adjacent 15-second intervals overlap, so activity may remain in multiple successive deltas and trigger repeated/blurred events. TrafficStats is device-wide; if the global threshold fires without a qualifying UID, selection/fallback can attribute a device-level event to an unrelated UID/system. No frequency or packet-size check exists.
+Impact: False/repeated/misattributed alerts, severity values disconnected from the UI's stated rule, and no reliable upload/packet detection.
+Recommended correction: Define the monitored metric and exact window; use disjoint monotonic samples or a properly designed rolling-window algorithm, separate global from per-app events, make attribution explicit, and show thresholds that match code. If packet-level detection is required, use packet-derived input rather than byte counters.
+Prerequisites: Product metric/threshold definition and device calibration across Wi-Fi, cellular, VPN, and idle traffic.
+
+8. SECURITY AUDIT FINDINGS
+
+Positive controls observed:
+- allowBackup=false is declared.
+- Android system VPN consent is requested with VpnService.prepare.
+- VPN service requires BIND_VPN_SERVICE and declares the system VPN intent action.
+- No custom TLS trust manager, certificate bypass, API endpoint, user credential, or API secret was found in application code.
+- No broadcast receiver or content provider is declared. MainActivity is exported only as the launcher. The VPN service's exported status is paired with BIND_VPN_SERVICE.
+- Traffic labels/events are held in memory by the React screen; no app database/file persistence or event upload was found.
+
+DS-003 | HIGH | P1 | CONFIRMED ISSUE | Security / release signing
+Affected: android/app/build.gradle:88-105; android/app/debug.keystore (binary)
+Evidence: The only signing config uses the repo's debug.keystore with storePassword/keyPassword "android" and alias "androiddebugkey". The release build explicitly sets signingConfig signingConfigs.debug. The keystore is tracked in Git.
+Technical explanation: A production-named release artifact is signed with the well-known development signing identity, not a protected product release/upload identity.
+Impact: Anyone who obtains the repository has the signing key and standard password. This weakens artifact provenance and makes updates, key rotation, and package identity unsafe for distribution. It is not evidence that a production release has already been distributed.
+Recommended correction: Create a separately controlled release/upload signing identity, keep it outside source control and CI logs, use protected CI secret storage, and document key backup/rotation. Validate the release certificate before publishing.
+Prerequisites: Release/distribution owner, signing-key custody and recovery plan, CI secret handling.
+
+DS-008 | LOW | P2 | CONFIRMED ISSUE | Privacy / special access disclosure
+Affected: AndroidManifest.xml:6; VpnModule.kt:61-66,121-133
+Evidence: PACKAGE_USAGE_STATS is declared; code opens Usage Access settings and tells the user only "Enable Usage Access for this app". The service then reads per-UID TX data and app labels for other apps.
+Technical explanation: Usage Access exposes sensitive cross-app activity metadata. The OS grant is explicit, but the code provides little in-app context about what is being measured or that events are kept in the UI's in-memory feed.
+Impact: Users may grant a broad special access without understanding its scope, creating privacy/trust and store-disclosure risk. No transmission of these values off-device was found.
+Recommended correction: Explain the exact access and local purpose before opening Settings, make collection opt-in, minimize retention and attribution, and align store/privacy disclosures with actual behavior.
+Prerequisites: Product privacy decision and, before distribution, privacy-policy/data-safety review.
+
+DS-011 | LOW | P2 | CANNOT VERIFY | Network security / cleartext policy
+Affected: AndroidManifest.xml:14; android/app/build.gradle:75-108
+Evidence: Manifest references ${usesCleartextTraffic}; no value assignment or Network Security Configuration is present in tracked project files. INTERNET permission is declared. No app-level HTTP request was found.
+Technical explanation: Without inspecting a merged debug/release manifest, this audit cannot establish whether the placeholder is injected elsewhere, causes a build/manifest issue, or allows cleartext in a release. No cleartext vulnerability is asserted.
+Impact: If release resolves this to true, any future HTTP client could send data without TLS; if unresolved, manifest processing/build may fail. Current app-source network use was not found.
+Recommended correction: Set explicit per-variant policy, normally cleartext disabled for release; allow only required local development traffic in debug. Add a Network Security Configuration when domain-level controls are needed and inspect the merged manifest.
+Prerequisites: Successful Android build and review of merged manifest/network endpoints.
+
+DS-013 | LOW | P3 | POTENTIAL ISSUE | Dependency/security maintenance
+Affected: package.json:13-42; package-lock.json; android/app/build.gradle:73,135-139
+Evidence: The lock pins React Native 0.83.1, Reanimated 4.2.2, safe-area-context 5.7.0, ESLint 8.57.1, TypeScript 5.9.3, and Prettier 2.8.8. Current registry pages show later upstream versions (including React Native 0.88.1 / 0.83.10, Reanimated 4.7.1, safe-area-context 5.11.1, ESLint 10.14.0, TypeScript 7.0.2, and Prettier 3.10.0). Reanimated's compatibility table indicates 4.2.x supports RN 0.83, so this audit did not identify a current Reanimated/RN mismatch. Hermes is enabled; the declared JSC fallback uses a dynamic 2026004.+ Maven version and is not resolved in the current Hermes branch.
+Technical explanation: Several frameworks/tooling dependencies trail upstream. No complete npm/OSV/GHSA scan of all 991 lockfile entries was performed, and node_modules is absent; absence of a listed CVE is not a clean vulnerability scan.
+Impact: Older patch lines may miss fixes, while unbounded JSC fallback can reduce reproducibility if Hermes is disabled. No specific vulnerable package/CVE is confirmed here.
+Recommended correction: Run an authoritative lockfile SCA check in CI, review advisories and maintainer support, update by compatible framework lines, and pin/freeze any Android fallback dependencies. Remove unused dependencies only after confirming no indirect use.
+Prerequisites: Dependency inventory/SCA service and React Native compatibility review.
+
+DS-014 | LOW | P3 | POTENTIAL ISSUE | Package visibility / attribution
+Affected: AndroidManifest.xml:1-39; VpnPacketCaptureService.kt:227-250
+Evidence: The service maps UIDs using PackageManager.getNameForUid/getApplicationInfo; no <queries> declaration or QUERY_ALL_PACKAGES permission exists. Failures fall back to the package name or UID.
+Technical explanation: On Android 11+ package visibility limits some queries about installed apps. Depending on package/UID visibility, display labels may be unavailable.
+Impact: Events may display uid:<number> or package identifiers rather than app labels. This affects attribution quality, not access control or the underlying UID byte summaries.
+Recommended correction: Test name resolution on Android 11+; declare only narrowly required package visibility if justified, and retain a safe unknown-app fallback. Do not request QUERY_ALL_PACKAGES without a strong distribution-policy justification.
+Prerequisites: Device tests across Android versions and a minimal visibility design.
+
+9. ARCHITECTURE AND CODE QUALITY FINDINGS
+
+DS-001 | HIGH | P1 | CONFIRMED ISSUE | Android service lifecycle / reliability
+Affected: VpnModule.kt:81-102; VpnPacketCaptureService.kt:22-34; AndroidManifest.xml:4-5,30-38
+Evidence: VpnModule uses startService. VpnPacketCaptureService never calls startForeground. Manifest declares FOREGROUND_SERVICE and service foregroundServiceType="specialUse" with a subtype, but omits FOREGROUND_SERVICE_SPECIAL_USE. There is no notification channel/notification code.
+Technical explanation: A VPN service on Android 8+ must promote itself to foreground after launch to remain alive. A foreground-service declaration alone does not perform that promotion. For Android 14+ the declared type also requires its type-specific permission when promoted.
+Impact: The OS can stop the long-running VPN after its temporary start allowance; status/monitoring can stop while UI indicates active. A future promotion using the current specialUse declaration can fail permission checks.
+Recommended correction: Establish a user-visible ongoing VPN notification and promote the service promptly; select the valid VPN FGS type and matching permission for each supported platform, handle notification denial appropriately, and keep stop/revoke/process restart state synchronized.
+Prerequisites: FGS type eligibility decision, notification channel/text, API 26-37 lifecycle tests, Play Console declaration if applicable.
+
+DS-006 | MEDIUM | P2 | CONFIRMED ISSUE | Native event lifecycle / memory
+Affected: EventBridge.kt:13-55; VpnPacketCaptureService.kt:105-118
+Evidence: pendingEvents is a ConcurrentLinkedQueue with no bound, expiry, persistence limit, or backpressure. emit adds when there is no active React instance; flushPending runs only after a React context is set.
+Technical explanation: A continuing service can queue events while the React instance is absent/inactive. Repeated events are retained for the process lifetime until a later context drains them; stale alert rows are replayed.
+Impact: Memory growth under repeated qualifying traffic and stale/duplicated alerts after reload. OOM is a plausible but workload-dependent consequence.
+Recommended correction: Bound/coalesce the queue, drop expired telemetry, retain only current VPN state separately, and avoid queuing events that are no longer actionable. Expose delivery/drop counts for diagnostics.
+Prerequisites: Event delivery semantics and lifecycle tests with JS reload, backgrounding, and process recreation.
+
+DS-007 | MEDIUM | P2 | POTENTIAL ISSUE | VPN startup/error state
+Affected: VpnPacketCaptureService.kt:41-75
+Evidence: ACTIVE is emitted at line 44 before Builder.establish() at line 68. The establish call is not in a catch/finally block; only addAllowedApplication failure and a null descriptor are handled.
+Technical explanation: A thrown establishment/security/state exception can terminate the service after ACTIVE was published, with no STOPPED event or cleanup path guaranteed by this method.
+Impact: UI can show ACTIVE while the VPN failed or the service crashed, and the user receives only a generic start failure message in JavaScript.
+Recommended correction: Emit ACTIVE only after establishment and foreground promotion succeed; catch startup exceptions, close partially acquired resources, report a typed failure, and always reconcile service/JS state.
+Prerequisites: Typed native error contract and lifecycle tests for denied consent, revoke, duplicate start, and establish failure.
+
+DS-009 | MEDIUM | P2 | CONFIRMED ISSUE | Testing / regression protection
+Affected: __tests__/App.test.tsx (tracked deletion in pre-existing worktree); jest.config.js:1-6; jest.setup.js:1-62; android/app/src/main (no test source set found)
+Evidence: Jest scripts and mocks exist, but there are no tests in the working tree and no Kotlin unit/instrumentation tests. Initial git status already showed the App.test.tsx deletion.
+Technical explanation: The principal UI/native event contract, service lifecycle, permission flow, thresholds, and release configuration have no regression coverage in the available tree.
+Impact: Changes to Android lifecycle, native-to-JS payloads, or build variants can break without detection. This report did not run tests or alter the pre-existing deletion.
+Recommended correction: Restore/add component tests, Kotlin unit tests, Android instrumentation, API matrix smoke tests, and a release-artifact verification pipeline as listed in Section 11.
+Prerequisites: Test devices/emulators, CI Android SDK/NDK, and maintainers' decision about the deleted tracked test.
+
+DS-010 | LOW | P2 | POTENTIAL ISSUE | UI / edge-to-edge compatibility
+Affected: android/gradle.properties:44; AndroidManifest.xml:17-25; App.tsx:78-79,179,302-304
+Evidence: targetSdk is 36 and edgeToEdgeEnabled=false. UI uses safe-area insets for root padding and sets StatusBar backgroundColor.
+Technical explanation: Android 15+ enforces edge-to-edge for target 35+, and Android 16 disables the target-36 opt-out. Status bar color setters no longer control the Android 15+ status bar in the same way. Safe-area handling is present, which may mitigate overlap, but no actual device layout was checked.
+Impact: Possible content overlap or unexpected status/navigation bar styling on cutouts, gesture navigation, tablets/foldables. No layout failure is confirmed from source alone.
+Recommended correction: Validate all screen edges on API35/36/37 with gesture and three-button navigation and cutouts; use system bar insets consistently and avoid depending on the legacy status bar background behavior.
+Prerequisites: Emulator/device matrix and large-screen UI review.
+
+DS-012 | LOW | P3 | CONFIRMED ISSUE | Build distribution / ABI coverage
+Affected: android/app/build.gradle:110-117; android/gradle.properties:27-28
+Evidence: React Native architectures list x86 and x86_64, but Android ABI splits include only armeabi-v7a and arm64-v8a and disable universal APK generation.
+Technical explanation: Generated app artifacts do not include x86/x86_64, so an x86_64 emulator has no matching APK output even though the project-wide React Native architecture list includes it.
+Impact: Android Studio/emulator development or automated tests on x86_64 can fail to install; only ARM device packages are produced.
+Recommended correction: Include required emulator ABIs in debug/test outputs or generate a universal/testing artifact while keeping intended release ABI policy explicit.
+Prerequisites: Distribution target list and CI/emulator ABI choice.
+
+DS-015 | LOW | P3 | CONFIRMED ISSUE | Platform scope / developer workflow
+Affected: package.json:6-7; README.md:67-105; App.tsx:10 (ToastAndroid); Android native source
+Evidence: npm scripts and README advertise iOS execution, but there is no ios directory and App.tsx uses Android-only ToastAndroid while the VPN native module has Android-only implementation.
+Technical explanation: The iOS command/documentation does not correspond to an iOS project or implementation.
+Impact: npm run ios cannot build this repository as checked out; users may infer cross-platform support that is not present.
+Recommended correction: Document the repository as Android-only or create a separately scoped iOS design/project before advertising iOS support.
+Prerequisites: Product platform support decision.
+
+Architecture assessment:
+- Essential before production: separate the UI from service state/telemetry; define whether the app is packet inspection or OS-counter telemetry; make native state observable and recoverable; add service lifecycle/error contracts; correct labels, permissions, and release signing.
+- Optional maintainability: split the large App.tsx into UI, event normalization, and service-control modules; define a typed native contract/codegen path when appropriate; reduce broad catch-and-ignore blocks; document event ownership and lifecycle.
+- State is local to Dashboard and not persisted; there is no backend/state store. Feed length is capped at 60 in JS, but native pending event queue is not capped.
+- EventBridge is a static singleton, and no current-status snapshot is queried when React Native reloads. UI may remain STOPPED until a new status event.
+- Native module uses legacy ReactPackage/ReactContextBaseJavaModule while New Architecture is enabled. RN compatibility interop may support it, but this code was not built/run with the current native module interop path.
+- Service mutable state is accessed by Android lifecycle and monitor thread; close/interrupt races are mostly guarded with AtomicBoolean and catch blocks, but the descriptor/thread lifecycle has no stress tests.
+- JS start/stop catches can suppress useful errors; stop silently ignores errors and the generic start toast hides native failure detail.
+- The monitor checks only Wi-Fi and mobile counters. Other transports and OEM stats behavior have not been verified.
+
+10. DEPENDENCY AND BUILD FINDINGS
+
+Android build review:
+- Root configuration supplies SDK 36/build tools 36.0.0/minSdk 24/NDK 27.1.12297006/Kotlin 2.1.20. Gradle wrapper is 9.0.0. The app applies React Native Gradle plugin and autolinks native modules. React Native 0.83.1's upstream version catalog specifies AGP 8.12.0; this repository's buildscript omits the AGP version and depends on plugin resolution.
+- Hermes is enabled, New Architecture is enabled. The app contains a legacy ReactPackage/ReactContextBaseJavaModule, with no typed TurboModule/codegen spec. Compatibility/interoperability is plausible but not runtime-verified.
+- Gradle release minification and resource shrinking are enabled; proguard-rules.pro is only a placeholder comment. Release shrink behavior needs an actual release smoke test.
+- JSC fallback is a dynamic Maven selector 2026004.+. It is not in the currently selected Hermes dependency branch, but it makes a Hermes-disabled build less reproducible.
+- ABI split configuration excludes x86/x86_64 (DS-012).
+- usesCleartextTraffic placeholder resolution is unknown (DS-011).
+- No direct build-time AndroidX/native SDK version conflicts were proven from the static files. There is no Android dependency lock/verification file. The npm lockfile is present and resolves 991 package records.
+
+JavaScript/native dependencies (resolved package-lock versions): RN 0.83.1, React 19.2.0, Reanimated 4.2.2, Worklets 0.7.4, Gesture Handler 2.30.0, Linear Gradient 2.8.3, Safe Area Context 5.7.0, SVG 15.15.3, TypeScript 5.9.3, Jest 29.7.0, ESLint 8.57.1, Prettier 2.8.8. React Native and its native peer libraries are not the latest upstream versions as of the audit date; this is a maintenance review item, not a finding that the current set cannot build. The Reanimated 4.2.x compatibility matrix lists RN 0.83 support. package.json also includes @react-native/new-app-screen and react-native-svg, for which no direct use was found in App.tsx; verify whether they remain needed before any later dependency cleanup.
+
+Security advisories: No package CVE/GHSA is asserted from this static audit. A full current advisory database scan of the 991-entry lockfile was not executed, so the report cannot certify the dependency tree as vulnerability-free. node_modules is absent; the exact lockfile should be scanned by npm/OSV or an equivalent SCA tool in CI. This limitation is explicitly retained rather than inventing vulnerability claims.
+
+DS-016 | LOW | P3 | CONFIRMED ISSUE | Build reproducibility
+Affected: android/app/build.gradle:73,135-139; android/gradle.properties:39
+Evidence: A JSC fallback uses version selector 2026004.+; Hermes currently evaluates true, selecting Hermes.
+Technical explanation: If a future build disables Hermes, Gradle may resolve a different JSC patch over time. The current build path is not affected by this fallback.
+Impact: Non-identical JSC builds and dependency drift in a configuration that is not used today.
+Recommended correction: Pin the selected JSC artifact version or use dependency verification/locking if maintaining a JSC flavor.
+Prerequisites: Decision on whether JSC is a supported build variant.
+
+11. TESTING AND VERIFICATION GAPS
+
+No test files are present in the working tree. Jest config and setup mocks are present, but git status at audit start showed the tracked __tests__/App.test.tsx as deleted. No Kotlin unit/instrumentation tests or androidTest source set were found. No build or test command was run under this read-only audit.
+
+Recommended strategy:
+- React Native unit/component tests: event normalization (NaN/negative/missing fields), event listener teardown, feed cap, status changes, and start/stop error display.
+- Kotlin unit tests: safeDelta, severity thresholds, rolling-window behavior, UID selection/fallback, and event payload formatting.
+- Android instrumentation: API24+ VPN consent and denial, Usage Access missing/granted/revoked, start/stop/repeated start, onRevoke, process kill/restart, FGS notification and API34+ type permissions, null/throwing establish behavior.
+- Network tests: assert which app/destination is routed, verify no unintended traffic blackhole/leak, and separately verify any future forwarding or packet parsing. Test Wi-Fi/cellular switches, no SIM, tethering, IPv6, DNS, and VPN already active.
+- Compatibility matrix: API24 minimum smoke, API26 service lifetime, API33 notification behavior, API34 typed FGS, API35 edge-to-edge, API36 target behavior, API37 platform/target behavior, and 16 KB page-size images/devices.
+- Build/security: debug and release build, inspect merged manifest and packaged permissions, verify release certificate, R8/minified smoke test, dependency SCA, and APK native ELF alignment.
+- Performance/privacy: long-duration idle/high-traffic CPU, battery, memory, queue growth, event volume, app-label permission behavior, and user-facing Usage Access disclosure.
+
+12. RECOMMENDED AUTHENTICATION ARCHITECTURE
+
+There is no current authentication system to secure. If account-based sync or remote policy management is introduced, use a backend as the authority. Perform Argon2id password verification on the server with unique salts and rate limits; never store passwords on the device. Issue short-lived access tokens and rotating revocable refresh sessions. Enforce authorization on every API request, including roles and tenant boundaries. Require HTTPS and platform certificate validation. Store refresh/session tokens using Android Keystore-backed encryption, clear them on logout, and revoke sessions server-side. Add login/recovery protections and optional MFA/passkeys based on the threat model. Keep local-only VPN consent and Usage Access separate from account authentication.
+
+13. PRIORITIZED PROBLEM LIST
+
+P0: Critical issues that must be addressed immediately
+- None confirmed as critical from the inspected source.
+
+P1: High-priority issues
+- DS-001: VPN service lacks foreground promotion and corresponding durable user notification/type permission path.
+- DS-002: Claimed packet capture does not exist; TUN route/allowlist do not capture ordinary other-app internet traffic.
+- DS-003: Release build uses committed default debug signing key.
+- DS-005: API 37 target/runtime and 16 KB native compatibility cannot be verified; current configuration remains API 36.
+
+P2: Medium-priority improvements
+- DS-004: Overlapping OS counter windows and displayed thresholds do not match implementation.
+- DS-006: EventBridge queue is unbounded and can replay stale telemetry.
+- DS-007: VPN setup can publish ACTIVE before successful establishment and lacks exception reconciliation.
+- DS-008: Usage Access needs clearer privacy disclosure and data minimization.
+- DS-009: No tests are present; the tracked Jest test is deleted in the pre-existing working tree.
+- DS-010: Android 15/16 edge-to-edge UI needs device verification.
+- DS-011: Cleartext placeholder/network security result cannot be verified from source.
+
+P3: Low-priority improvements and optional enhancements
+- DS-012: x86/x86_64 emulator artifacts excluded by ABI splits.
+- DS-013: Several dependencies/tooling versions trail upstream; run a full lockfile SCA scan and compatibility review.
+- DS-014: Package label lookup may be affected by Android package visibility.
+- DS-015: iOS script/documentation has no matching iOS project.
+- DS-016: Dynamic JSC fallback weakens reproducibility if Hermes is disabled.
+
+14. RECOMMENDED IMPLEMENTATION ROADMAP
+
+1. Resolve product scope: decide whether DataSentry reports OS-level aggregate usage or performs packet-level inspection. Correct names and privacy claims either way.
+2. Make VPN lifecycle reliable: add foreground promotion/notification, choose eligible Android 14+ FGS type and permission, report actual service state, handle revoke and process restart, and contain startup exceptions.
+3. Correct telemetry: define disjoint or defensible time windows, avoid double counting, distinguish device-wide counters from app UID counters, correct attribution/severity, and align the dashboard rule to actual calculations.
+4. Secure release distribution: use a production-controlled signing identity, protect it outside source control, verify release certificates, and inspect the final manifest's cleartext policy.
+5. Establish privacy controls: explain Usage Access, reduce collected app metadata, specify local retention, and keep permission use aligned with store disclosures.
+6. Validate platform matrix: build/test API24-37, edge-to-edge on API35/36, large screens for API37 target, FGS behavior, and final 16 KB native library alignment.
+7. Restore/add verification: unit, component, native instrumentation, VPN routing, release, security, compatibility, and battery/performance checks. Preserve the pre-existing test deletion as workspace state until the project owner decides otherwise.
+8. Review dependencies with a complete lockfile SCA scan; update only on supported compatible lines and pin any active Android fallback artifacts.
+9. Add account authentication only if the product adds backend-owned user data or APIs; use the server-authoritative model described above.
+
+15. FINAL ASSESSMENT
+
+The repository is a small Android-only React Native demo with a useful UI/native event bridge, but the implementation does not capture packet payloads. It samples operating-system TX counters, and its VPN interface is narrowly routed and unread. The UI/README overstate what the native code measures. The long-running VPN service lacks foreground promotion, release artifacts use the default debug signing identity, and detector windows/threshold descriptions are inconsistent. No authentication/backend exists, and Android OS permission grants are not user accounts.
+
+Android 14-16 have a confirmed VPN service lifecycle defect and unverified edge-to-edge/native alignment behavior. Android 17 API 37 is publicly released, but this project only compiles and targets API 36 and was not tested on any Android device in this audit environment. Do not claim API 37 or 16 KB compatibility until a real build and test matrix passes. No code was modified. AUDIT_REPORT.txt is the sole audit artifact.
+
+SOURCE REFERENCES
+
+Android platform/API documentation:
+- Android 17 release announcement: https://developer.android.com/blog/posts/android-17-is-here
+- Android API level mapping: https://developer.android.com/guide/topics/manifest/uses-sdk-element
+- VPN service lifecycle: https://developer.android.com/reference/android/net/VpnService
+- VPN developer guide: https://developer.android.com/develop/connectivity/vpn
+- Foreground-service launch requirements: https://developer.android.com/develop/background-work/services/fgs/launch
+- Foreground-service type permissions and eligibility: https://developer.android.com/develop/background-work/services/fgs/service-types
+- Android 15 behavior changes / edge-to-edge: https://developer.android.com/about/versions/15/behavior-changes-15
+- Android 16 behavior changes / edge-to-edge: https://developer.android.com/about/versions/16/behavior-changes-16
+- Android 17 target behavior: https://developer.android.com/about/versions/17/behavior-changes-17
+- 16 KB page-size guidance: https://developer.android.com/guide/practices/page-sizes
+- NetworkStatsManager API: https://developer.android.com/reference/android/app/usage/NetworkStatsManager
+- TrafficStats API: https://developer.android.com/reference/android/net/TrafficStats
+- Package visibility: https://developer.android.com/training/package-visibility
+
+Dependency/build references checked on 2026-11-13:
+- React Native 0.83.1 Gradle version catalog (AGP/Kotlin/SDK baseline): https://github.com/react/react-native/blob/v0.83.1/packages/react-native/gradle/libs.versions.toml
+- React Native npm versions: https://www.npmjs.com/package/react-native?activeTab=versions
+- Reanimated npm versions: https://www.npmjs.com/package/react-native-reanimated?activeTab=versions
+- Reanimated compatibility matrix: https://docs.swmansion.com/react-native-reanimated/docs/guides/compatibility/
+- Safe-area-context npm versions: https://www.npmjs.com/package/react-native-safe-area-context?activeTab=versions
+- ESLint npm: https://www.npmjs.com/package/eslint
+- TypeScript npm versions: https://www.npmjs.com/package/typescript?activeTab=versions
+- Prettier npm versions: https://www.npmjs.com/package/prettier?activeTab=versions
+

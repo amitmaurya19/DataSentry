@@ -1,0 +1,65 @@
+DataSentry Phase 2 — Stage 1 Build Report
+Date: 2026-11-13
+Workspace: C:\Users\Krishna\Desktop\DataSentry
+Scope: Environment inspection and dependency installation; no source or build configuration changes.
+
+1. ENVIRONMENT
+
+- Node.js: v24.18.0. Compatible with package.json requirement Node >=20.
+- npm: 11.16.0. PowerShell blocks the npm.ps1 shim under the current execution policy; npm.cmd works and was used.
+- Java: 21.0.11 LTS, available through C:\Program Files\Common Files\Oracle\Java\javapath\java.exe.
+- JAVA_HOME: unset at process, user, and machine scope. The project README specifies JDK 17; React Native's setup guide also recommends JDK 17.
+- ANDROID_HOME: unset at process, user, and machine scope.
+- ANDROID_SDK_ROOT: unset at process, user, and machine scope.
+- Android SDK: Not found in the standard locations checked, including %LOCALAPPDATA%\Android\Sdk, %USERPROFILE%\Android\Sdk, C:\Android\Sdk, and standard Program Files locations. No Android Studio installation was found in the standard location checked.
+- Required project SDK versions from android/build.gradle: Android Platform 36, Android Build Tools 36.0.0, and NDK 27.1.12297006. The SDK Platform Tools (including adb) and Android SDK Command-line Tools are also needed for device/build workflows.
+- SDK components/build tools: adb, sdkmanager, aapt/aapt2, d8, zipalign, apksigner, ndk-build, and cmake are not available on PATH; no SDK component directories were found in the checked SDK roots.
+- Physical device: Could not determine whether a phone is connected because adb is unavailable. No device state was verified.
+- Gradle wrapper: Present at android\gradlew.bat with android\gradle\wrapper\gradle-wrapper.jar. Wrapper distribution is Gradle 9.0.0. System Gradle is not available on PATH.
+- android/local.properties: Absent.
+
+2. DEPENDENCY INSTALLATION
+
+Command: npm.cmd ci
+Working directory: C:\Users\Krishna\Desktop\DataSentry
+Result: SUCCESS (exit code 0); added 989 packages in 24 seconds.
+
+Verified after installation:
+- react-native@0.83.1 is installed.
+- node_modules/@react-native/gradle-plugin/package.json exists and reports @react-native/gradle-plugin@0.83.1.
+
+Warnings, not installation errors:
+- npm reported deprecation warnings for several locked transitive packages, including inflight, rimraf, glob, request, uuid, and eslint.
+- npm's allow-scripts policy reported that the sharp@0.28.0 install script is pending approval and was not run.
+- No package versions or lockfiles were changed by this step.
+
+3. ANDROID BUILD
+
+Intended command: .\gradlew.bat assembleDebug
+Working directory: C:\Users\Krishna\Desktop\DataSentry\android
+Result: NOT RUN. The Android SDK and required SDK components are not installed/detectable, so the build environment is not ready. No Gradle build failure was produced, and no source/configuration fix is proposed without an actual build result.
+
+APK: None generated. There is no APK path to install.
+
+4. WINDOWS SETUP REQUIRED BEFORE RESUMING STAGE 1
+
+1. Install Android Studio, then use Tools > SDK Manager to install Android SDK Platform 36, Android SDK Build-Tools 36.0.0, Android SDK Platform-Tools, Android SDK Command-line Tools (latest), and NDK (Side by side) 27.1.12297006. Accept the Android SDK licenses.
+2. Install JDK 17, as required by the project README and recommended by React Native. Set JAVA_HOME to the JDK 17 installation directory and ensure its bin directory is available on PATH.
+3. Set ANDROID_HOME to the Android SDK directory selected in Android Studio (commonly %LOCALAPPDATA%\Android\Sdk). Add %ANDROID_HOME%\platform-tools to PATH so adb is available. Android's current command-line guidance recommends ANDROID_HOME; ANDROID_SDK_ROOT is not set here.
+4. Connect the Android phone over USB, enable Developer options and USB debugging, approve the computer authorization prompt, then run `adb devices`. Confirm the phone appears with state `device`.
+5. When these prerequisites are ready, resume Stage 1 to run the unchanged build. The command remains `cd android` followed by `.\gradlew.bat assembleDebug`. Do not start Stage 2 until separately approved.
+
+If the later build succeeds, inspect android\app\build\outputs\apk\debug\ for the generated APK(s). No install command is supplied as a completed action because no APK or adb device is available yet.
+
+5. WORKSPACE STATE
+
+- No application source, Kotlin, Gradle, manifest, package version, or lockfile was modified.
+- npm ci populated the ignored node_modules directory.
+- Pre-existing Git entries remain: deleted __tests__/App.test.tsx and untracked AUDIT_REPORT.txt and PHASE2_BASELINE.txt.
+- This Stage 1 report is newly created. No APK was installed and no physical-device behavior was tested.
+
+Reference documentation:
+- Project requirements: README.md and android/build.gradle.
+- Android SDK Manager and required SDK package types: https://developer.android.com/studio/intro/update
+- Android NDK installation/version management: https://developer.android.com/studio/projects/install-ndk
+- React Native Android setup and JDK guidance: https://reactnative.dev/docs/set-up-your-environment

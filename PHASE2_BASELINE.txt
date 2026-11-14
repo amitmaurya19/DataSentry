@@ -1,0 +1,128 @@
+DATASENTRY PHASE 2 — STAGE 0 BASELINE
+
+Date: 2026-11-13
+Scope: Read-only inspection of the current workspace.
+Product decisions recorded: Android only; intended API 24–37; local-only; no authentication/backend; immediate work is to verify/improve OS-level traffic monitoring and dashboard logs, not to build packet forwarding/inspection.
+
+1. CURRENT ARCHITECTURE
+
+This is a React Native 0.83.1 Android application. App.tsx is the single dashboard screen. Android-specific Kotlin code is under android/app/src/main/java/com/datasentry.
+
+- App.tsx mounts NativeEventEmitter for VpnModule, holds VPN status, alertCount, last-event time, and a feed in React component state.
+- MainActivity.kt hosts the React Native component named datasentry.
+- MainApplication.kt creates the React host and manually adds datasentryPackage.
+- MobileSocNativePackage.kt exposes VpnModule as a legacy React Native module.
+- VpnModule.kt checks Android Usage Access, obtains VPN consent using VpnService.prepare, starts/stops VpnPacketCaptureService, and provides playTick.
+- VpnPacketCaptureService.kt extends Android VpnService, establishes a restricted TUN configuration, then samples Android traffic statistics on a worker thread.
+- EventBridge.kt sends VPN_STATUS and UPLOAD_DETECTED events to React Native on the UI thread, or buffers them in a process-local ConcurrentLinkedQueue.
+- The manifest declares INTERNET, FOREGROUND_SERVICE, VIBRATE, PACKAGE_USAGE_STATS, the launcher activity, and the VPN service.
+- package.json/package-lock.json define React Native and native UI dependencies. No storage package or navigation library is listed.
+- No backend, database, persistent event store, iOS project, or authentication implementation was found.
+
+The long-term product decision is real VPN packet inspection, but the current service is not a packet reader or forwarding VPN. Stage 0 did not change source or begin packet inspection.
+
+2. EXISTING FEATURES IN SOURCE (NOT DEVICE-VERIFIED)
+
+The source contains these user-facing paths:
+- Start VPN and Stop VPN buttons.
+- Android VPN consent flow through VpnService.prepare and an Activity result listener.
+- Usage Access check using AppOpsManager; if missing, VpnModule opens Usage Access settings and rejects the start promise with USAGE_STATS_REQUIRED.
+- VPN_STATUS native events update the dashboard ACTIVE/STOPPED indicator.
+- A per-UID traffic-summary poller and a device-wide transmitted-byte counter.
+- UPLOAD_DETECTED events are rendered in the dashboard feed and increment an in-memory alert count.
+- Each received event causes a short ToastAndroid message, 40 ms vibration, and ToneGenerator tick where those calls succeed.
+- Animated alert pulse/intensity and VPN status indicator.
+- Stop/revoke code closes the TUN descriptor, interrupts the monitor thread, and emits STOPPED.
+
+These are code paths only. No Android build, device run, permission flow, upload, notification, or regression test was performed in Stage 0, so their successful runtime behavior is not confirmed.
+
+3. GOOGLE PHOTOS MONITORING
+
+No Google Photos-specific implementation exists in the current source:
+- No reference to com.google.android.apps.photos or Google Photos was found.
+- The monitor is generic by UID. It collects summary buckets, compares UID totals, and resolves a UID to a package name and label through PackageManager.getNameForUid/getApplicationInfo.
+- There is no check that the resolved package is Google Photos, and no event is hardcoded to that package.
+- If package resolution fails, the service falls back to a package identifier or uid:<number>.
+- A per-UID event is selected only when its computed delta reaches 120,000 bytes. If only the device-wide threshold is reached, the event can use another UID or the system UID fallback. That fallback is not reliable evidence that the selected app caused the device-wide traffic.
+- The native code reads bucket.txBytes and TrafficStats.getTotalTxBytes. It does not read bucket.rxBytes or TrafficStats receive counters. It therefore observes transmitted bytes only; it does not produce an RX measurement for comparison.
+- The data is OS-accounted app/device traffic, not per-photo file size, packet payload, or proof that an upload completed. Event names and UI copy currently overstate the certainty by saying UPLOAD_DETECTED / UPLOAD TRAFFIC DETECTED.
+- The current poll interval is 1,500 ms. Each NetworkStatsManager query covers the preceding 15,000 ms, so consecutive intervals overlap. No event ID or duplicate suppression exists; repeated qualifying events are possible.
+- Current thresholds are 120,000 bytes per UID and 300,000 bytes device-wide. Severity uses 300,000 and 1,000,000 bytes. The dashboard text instead says >1200B plus frequency in 2 seconds; no such native frequency rule exists.
+- NetworkStatsManager calls can fail on missing Usage Access or unavailable data. The service catches SecurityException/other query errors and may continue with missing/partial stats. Delayed or sparse OS stats are not handled as a separately labeled measurement quality state.
+- There is no Android NotificationManager/NotificationChannel notification. The current visible notification-like response is a short ToastAndroid message, alongside vibration and sound. The toast does not include app name, package, observed amount, timestamp, or event classification.
+- Google Photos behavior and any earlier tested behavior remain unverified. No physical device or adb is available in this workspace.
+
+4. MONITORING AND EVENT FLOW
+
+1. App.tsx calls VpnModule.startVpn.
+2. VpnModule requires an Activity, checks Usage Access, then requests Android VPN consent if required.
+3. The module starts VpnPacketCaptureService using Context.startService.
+4. onStartCommand invokes startCapture. The service emits ACTIVE before establish succeeds.
+5. The service configures a TUN address 10.0.0.2/32, MTU 1500, route 10.0.0.0/24, allowBypass, and allows only DataSentry's own package in the VPN. This is intentionally not a global route.
+6. The service stores the ParcelFileDescriptor but never reads packets from it. It does not forward traffic.
+7. A daemon thread samples TrafficStats total TX and NetworkStatsManager summary TX for Wi-Fi and mobile networks. It skips the DataSentry UID for per-app alerts.
+8. On threshold, it emits size, timestamp, severity, UID, optional package/app names, and deviceTotalDeltaBytes.
+9. EventBridge emits to the active React Native instance; when unavailable it queues events in memory without a size limit.
+10. App.tsx prepends each event to feed, keeps only 60 rows in that component state, increments alertCount, shows generic toast/vibration/tick, and animates the dashboard.
+
+5. PERSISTENCE AND DASHBOARD
+
+No current persistent log storage was found:
+- EventBridge queue is an in-memory process-local queue, not durable storage.
+- React feed and alertCount are React useState values. They disappear when Dashboard remounts or the process restarts.
+- The feed keeps at most 60 events, prepended newest-first. This is a UI state cap, not a stored history.
+- No storage/database dependency, storage service, SQLite/Room code, SharedPreferences event store, or log repository was found.
+- Dashboard contains a “Threat Feed” list and empty-state message. It has no View All action, separate history screen, or navigation setup.
+- Native event payload has size, timestamp, severity, uid, appName, packageName, and deviceTotalDeltaBytes where set. It has no stable event ID, explicit event type field, human-readable amount, or measurement-source field.
+
+6. BUILD AND DEVICE ENVIRONMENT
+
+Workspace checks:
+- Git branch: master, tracking origin/master.
+- Initial Stage 0 git status: pre-existing tracked deletion D __tests__/App.test.tsx and untracked AUDIT_REPORT.txt. No other pre-existing status entries were present. These have not been modified by Stage 0.
+- Android SDK environment variables ANDROID_HOME and ANDROID_SDK_ROOT are unset. JAVA_HOME is unset.
+- adb, sdkmanager, and a system Gradle command are unavailable. No connected device can be enumerated.
+- Node.js v24.18.0 and npm 11.16.0 are available. package.json requires Node >=20.
+- Java is 21.0.11; README lists JDK 17. The repository does not pin the JDK.
+- Gradle wrapper scripts/JAR are present and wrapper version is configured as 9.0.0.
+- node_modules is absent. settings.gradle expects the React Native Gradle plugin under node_modules.
+- No android/app/build output directory or iOS project is present.
+- minSdk 24, compileSdk 36, targetSdk 36, build tools 36.0.0, NDK 27.1.12297006, Kotlin 2.1.20. The React Native 0.83.1 Gradle version catalog referenced by the audit pins AGP 8.12.0.
+- A build was not attempted. With both node_modules/React Native Gradle plugin and Android SDK/device tooling absent, build status cannot be established from this workspace. No build/test command was run because Stage 0 is read-only and those prerequisites are unavailable.
+
+7. CURRENT TESTS AND EXISTING AUDIT FINDINGS
+
+- Jest configuration and React Native mocks exist in jest.config.js and jest.setup.js.
+- No tests are present in the current workspace. The tracked __tests__/App.test.tsx deletion was already present in Git status.
+- No Kotlin unit tests or Android instrumentation test source set was found.
+- Tests and physical-device behavior were not run.
+
+Audit findings most relevant to these requested stages:
+- DS-001: VpnService is not promoted to foreground and has no notification; Android lifecycle reliability is at risk.
+- DS-002: TUN descriptor is not read; the current product reports OS counters rather than packet inspection.
+- DS-004: Overlapping 15-second counters and UI/native thresholds disagree; attribution/duplicates may be inaccurate.
+- DS-005: API 37 and 16 KB native compatibility are unverified; project targets API 36.
+- DS-006: EventBridge queue is unbounded and non-persistent.
+- DS-007: Service emits ACTIVE before establishing the tunnel and does not catch establish exceptions.
+- DS-008: Usage Access needs clearer user-facing purpose/disclosure.
+- DS-009: Tests are absent in the working tree.
+- DS-010: Edge-to-edge behavior on API 35/36 has not been device-tested.
+- DS-011: Cleartext placeholder resolution is unknown without a merged manifest/build.
+- DS-014: UID-to-package display-name resolution may be limited by Android package visibility.
+
+8. MINIMAL IMPLEMENTATION RECOMMENDATION (FOR LATER APPROVED STAGES)
+
+Stage 1 should remain verification-only. Use an actual Android device, capture starting/ending per-UID TX and RX counters, resolve Google Photos UID from Android's package manager, upload a known batch, compare with unrelated app activity and downloads, and record whether toast and feed events arrive. No real-device observation can be claimed in this workspace today.
+
+If implementation is approved after verification:
+- Keep the existing generic application monitoring path. Attribute an event to Google Photos only when the observed UID resolves to com.google.android.apps.photos.
+- Label the value as observed per-application transmitted traffic over an interval. Do not label it an exact photo size or successful upload.
+- Keep TX and RX byte values separate and base upload-like classification only on measured TX; do not infer completion. Treat missing/delayed counters as unavailable/partial data.
+- Define a non-overlapping sampling/deduplication strategy and use thresholds only after measuring real device counter behavior. Keep other apps supported.
+- Preserve the current VPN consent and Usage Access flows, dashboard layout, VPN controls, event count, toast/sound/vibration unless test evidence requires a change. Address foreground-service lifecycle as a separate relevant defect; do not start packet parsing/forwarding in these immediate stages.
+- Add one local persistent event-history layer after choosing a storage mechanism compatible with the existing RN/native architecture. Keep retention separate from the dashboard's latest-ten view limit.
+- Keep the main dashboard newest-first with at most ten visible rows. Add View All over the full stored history; do not fabricate production records.
+- Add automated tests for calculations, package attribution handling, event storage/sorting, and 0/1/10/11/>50 UI records. Mark physical-device Google Photos and API 24–37 matrix verification separately from unit tests.
+
+No source-code implementation was performed during Stage 0.
+
